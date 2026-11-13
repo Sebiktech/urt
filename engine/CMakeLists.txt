@@ -11,7 +11,13 @@ add_library(urt_engine STATIC
     src/core/platform.cpp
     src/core/time.cpp
     src/ecs/movement_system.cpp
-    src/ecs/world.cpp)
+    src/ecs/world.cpp
+    src/net/bytes.cpp
+    src/net/client.cpp
+    src/net/interest_grid.cpp
+    src/net/protocol.cpp
+    src/net/server.cpp
+    src/net/transport.cpp)
 
 add_library(urt::engine ALIAS urt_engine)
 
@@ -25,4 +31,5 @@ target_link_libraries(urt_engine
         glm::glm-header-only
         Threads::Threads
     PRIVATE
+        enet
         urt_options)

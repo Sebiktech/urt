@@ -21,7 +21,21 @@ FetchContent_Declare(glm
 # Header-only GLM: nothing to compile, and no warnings from its sources.
 set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
 
-FetchContent_MakeAvailable(entt glm)
+# ENet - reliable and unreliable messaging over UDP (C library).
+FetchContent_Declare(enet
+    GIT_REPOSITORY https://github.com/lsalzman/enet.git
+    GIT_TAG        v1.3.18
+    GIT_SHALLOW    TRUE
+    SYSTEM)
+
+FetchContent_MakeAvailable(entt glm enet)
+
+# ENet's own CMake file does not say where its headers are or which system
+# libraries it needs on Windows, so add both here.
+target_include_directories(enet SYSTEM PUBLIC "${enet_SOURCE_DIR}/include")
+if(WIN32)
+    target_link_libraries(enet PUBLIC ws2_32 winmm)
+endif()
 
 if(URT_BUILD_TESTS)
     # doctest - unit test framework (header only).

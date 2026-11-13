@@ -1,8 +1,8 @@
 // urt_server: the dedicated server. It owns the authoritative game state and
 // has no window, so it runs on a plain Linux box.
 //
-// Step 2: players can connect, walk around and see each other. A few NPCs
-// walk in circles so a single client has something to look at.
+// Players connect, walk around and see each other. What happens in the world
+// beyond that comes from resources: folders of Luau scripts in resources/.
 
 #include "urt/app/application.hpp"
 #include "urt/core/args.hpp"
@@ -10,13 +10,16 @@
 #include "urt/ecs/components.hpp"
 #include "urt/ecs/movement_system.hpp"
 #include "urt/net/server.hpp"
+#include "urt/script/script_system.hpp"
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -27,7 +30,8 @@ void print_usage() {
               "Options:\n"
               "  --port <n>            UDP port to listen on, 0 = any free port (default 30777)\n"
               "  --max-players <n>     player limit (default 64)\n"
-              "  --npcs <n>            walking test characters to spawn (default 8)\n"
+              "  --resources <dir>     folder with script resources (default: the nearest 'resources' folder)\n"
+              "  --script-timeout <s>  stop a script call that runs longer; 0 = never (default 0.25)\n"
               "  --tick-rate <hz>      simulation ticks per second (default 30)\n"
               "  --ticks <n>           stop after n ticks (default: run until Ctrl+C)\n"
               "  --threads <n>         worker threads (default: from hardware)\n"
@@ -47,24 +51,24 @@ bool read_count(const urt::Args& args, const char* name, double fallback, double
     return true;
 }
 
-// Walks in a circle: forward along its own facing direction while turning.
-// Placeholder behaviour until NPCs are scripted in Lua.
-struct Patrol {
-    float speed = 1.4f; // metres per second
-};
-
-class PatrolSystem final : public urt::System {
-public:
-    std::string_view name() const override { return "patrol"; }
-
-    void tick(urt::World& world, const urt::TickContext&) override {
-        auto view = world.registry.view<const Patrol, const urt::Transform, urt::Velocity>();
-        for (auto [entity, patrol, transform, velocity] : view.each()) {
-            velocity.linear = {std::cos(transform.yaw) * patrol.speed, 0.0f,
-                               std::sin(transform.yaw) * patrol.speed};
+// Looks for a folder named "resources" in the current folder and its
+// parents. Running the server from the build folder (as an IDE does) then
+// still finds the resources in the source tree.
+std::filesystem::path find_resources_directory() {
+    std::error_code ignored;
+    std::filesystem::path folder = std::filesystem::current_path(ignored);
+    for (int level = 0; level < 8 && !folder.empty(); ++level) {
+        const std::filesystem::path candidate = folder / "resources";
+        if (std::filesystem::is_directory(candidate, ignored)) {
+            return candidate;
         }
+        if (folder == folder.parent_path()) {
+            break; // reached the root
+        }
+        folder = folder.parent_path();
     }
-};
+    return {};
+}
 
 int run_server(const urt::Args& args) {
     if (args.has("help")) {
@@ -92,12 +96,10 @@ int run_server(const urt::Args& args) {
     }
 
     double max_ticks = 0;
-    double npc_count = 0;
     double threads = 0;
     double port = 0;
     double max_players = 0;
     if (!read_count(args, "ticks", 0, 0, 1e15, max_ticks) ||
-        !read_count(args, "npcs", 8, 0, 100'000, npc_count) ||
         !read_count(args, "threads", 0, 0, 1024, threads) ||
         !read_count(args, "port", urt::net::default_port, 0, 65535, port) ||
         !read_count(args, "max-players", 64, 1, 4000, max_players)) {
@@ -115,11 +117,27 @@ int run_server(const urt::Args& args) {
     net_config.port = static_cast<std::uint16_t>(port);
     net_config.max_players = static_cast<std::size_t>(max_players);
 
+    urt::script::ScriptConfig script_config;
+    if (const auto directory = args.value("resources")) {
+        script_config.resources_directory = std::filesystem::path(std::string(*directory));
+    } else if (args.has("resources")) {
+        urt::log::error("server", "--resources needs a folder");
+        return 2;
+    } else {
+        script_config.resources_directory = find_resources_directory();
+    }
+    const std::optional<double> script_timeout = args.number("script-timeout", script_config.max_call_seconds);
+    if (!script_timeout || *script_timeout < 0.0 || *script_timeout > 3600.0) {
+        urt::log::error("server", "--script-timeout needs a number of seconds between 0 and 3600");
+        return 2;
+    }
+    script_config.max_call_seconds = *script_timeout;
+
     urt::Application app(config);
 
-    // Order matters: read the network, decide, move, then send the result.
+    // Order matters: read the network, let scripts react, move, then send.
     auto& server = app.add_system<urt::net::Server>(net_config);
-    app.add_system<PatrolSystem>();
+    app.add_system<urt::script::ScriptSystem>(server, script_config);
     app.add_system<urt::MovementSystem>();
     app.add_system<urt::net::ServerSnapshotSystem>(server);
 
@@ -127,22 +145,12 @@ int run_server(const urt::Args& args) {
         return 1;
     }
 
-    // NPCs on circles of different sizes around the origin.
-    auto& registry = app.world().registry;
-    const auto npcs = static_cast<std::size_t>(npc_count);
-    for (std::size_t i = 0; i < npcs; ++i) {
-        const float angle = static_cast<float>(i) * 2.4f;
-        const float distance = 6.0f + 2.0f * static_cast<float>(i % 16);
-        const urt::Entity entity = registry.create();
-        registry.emplace<urt::Transform>(
-            entity, urt::Transform{.position = {std::cos(angle) * distance, 0.0f, std::sin(angle) * distance},
-                                   .yaw = angle});
-        registry.emplace<urt::Velocity>(entity, urt::Velocity{.yaw_rate = 0.3f});
-        registry.emplace<Patrol>(entity);
-        server.make_networked(app.world(), entity);
+    if (script_config.resources_directory.empty()) {
+        urt::log::warn("server", "no 'resources' folder found; the world will be empty");
+    } else {
+        urt::log::info("server", "resources from '{}'", script_config.resources_directory.string());
     }
-
-    urt::log::info("server", "URT server {} started with {} NPCs", URT_VERSION, npcs);
+    urt::log::info("server", "URT server {} started", URT_VERSION);
     return app.run();
 }
 

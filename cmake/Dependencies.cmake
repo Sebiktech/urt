@@ -28,7 +28,23 @@ FetchContent_Declare(enet
     GIT_SHALLOW    TRUE
     SYSTEM)
 
-FetchContent_MakeAvailable(entt glm enet)
+# Luau - the scripting language for resources: a Lua dialect built to run
+# code you do not trust.
+set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(luau
+    GIT_REPOSITORY https://github.com/luau-lang/luau.git
+    GIT_TAG        0.746
+    GIT_SHALLOW    TRUE
+    # A folder that does not exist: this stops FetchContent from adding the
+    # project by itself, so we can add it below with EXCLUDE_FROM_ALL.
+    SOURCE_SUBDIR  urt-adds-this-manually)
+
+FetchContent_MakeAvailable(entt glm enet luau)
+
+# Luau also contains a type checker and a native code generator. With
+# EXCLUDE_FROM_ALL only the parts we link (VM and compiler) get built.
+add_subdirectory("${luau_SOURCE_DIR}" "${luau_BINARY_DIR}" EXCLUDE_FROM_ALL SYSTEM)
 
 # ENet's own CMake file does not say where its headers are or which system
 # libraries it needs on Windows, so add both here.

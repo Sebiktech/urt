@@ -10,6 +10,7 @@
 //
 // Add the systems to the Application in that order.
 
+#include "urt/ecs/components.hpp"
 #include "urt/ecs/system.hpp"
 #include "urt/ecs/world.hpp"
 #include "urt/net/interest_grid.hpp"
@@ -38,6 +39,22 @@ struct ServerConfig {
     std::size_t max_queued_inputs = 8;   // inputs kept per player; more than that and the oldest is dropped
 };
 
+// Something that happened to a player during the current tick.
+struct PlayerEvent {
+    enum class Kind { Joined, Left };
+
+    Kind kind = Kind::Joined;
+    NetId id = 0;
+    std::string name;
+    glm::vec3 position{0.0f}; // where the player appeared, or was last
+};
+
+struct PlayerInfo {
+    NetId id = 0;
+    std::string name;
+    Entity entity = entt::null;
+};
+
 class Server final : public System {
 public:
     explicit Server(ServerConfig config);
@@ -57,6 +74,25 @@ public:
 
     // The entity a player controls, or entt::null.
     Entity player_entity(NetId player_id) const;
+
+    bool is_player(NetId id) const { return player_entity(id) != entt::null; }
+
+    // Everyone who is in the game right now.
+    std::vector<PlayerInfo> players() const;
+
+    // Players who joined or left during the current tick, in order. Filled
+    // by tick(); systems that run after the server read it.
+    const std::vector<PlayerEvent>& player_events() const { return player_events_; }
+
+    // Creates an entity clients can see, standing still at `transform`.
+    NetId spawn(World& world, const Transform& transform);
+
+    // Removes an entity created with spawn() or make_networked(). Players
+    // cannot be removed this way. Returns false if there is no such entity.
+    bool despawn(World& world, NetId id);
+
+    // The entity with this network id, player or not, or entt::null.
+    Entity find(World& world, NetId id);
 
     std::string_view name() const override { return "net-server"; }
 
@@ -94,12 +130,14 @@ private:
     void remove_session(World& world, PeerId peer);
     void reject(PeerId peer, Session& session, RejectReason reason);
     void kick(World& world, PeerId peer, Session& session, std::string_view why);
-    void despawn(World& world, Session& session);
+    void remove_player(World& world, Session& session);
     void consume_inputs(World& world);
 
     ServerConfig config_;
     Transport transport_;
     std::unordered_map<PeerId, Session> sessions_;
+    std::unordered_map<NetId, Entity> networked_; // every entity with a network id
+    std::vector<PlayerEvent> player_events_;
     std::size_t player_count_ = 0;
     NetId next_net_id_ = 1;
     bool warned_snapshot_overflow_ = false;

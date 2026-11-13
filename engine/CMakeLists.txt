@@ -18,7 +18,9 @@ add_library(urt_engine STATIC
     src/net/interpolation.cpp
     src/net/protocol.cpp
     src/net/server.cpp
-    src/net/transport.cpp)
+    src/net/transport.cpp
+    src/script/script_system.cpp
+    src/script/vm.cpp)
 
 add_library(urt::engine ALIAS urt_engine)
 
@@ -33,4 +35,6 @@ target_link_libraries(urt_engine
         Threads::Threads
     PRIVATE
         enet
+        Luau.Compiler
+        Luau.VM
         urt_options)

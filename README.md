@@ -1,11 +1,12 @@
 # URT – Universal Roleplay Tool
 
 Vlastný engine, hra a editor pre roleplay servery. Server je autorita, herná
-logika beží v Lua resources a editor je klient v inom režime.
+logika beží v skriptoch (resources) a editor je klient v inom režime.
 
-Stav: **kroky 1 (jadro) a 2 (sieť) sú hotové.** Hráči sa
-pripoja, chodia a vidia sa navzájom v okne kreslenom cez Vulkan, zatiaľ ako
-farebné kvádre. Lua ešte nie je.
+Stav: **kroky 1 (jadro) a 2 (sieť) sú hotové, z kroku 3 fungujú skripty na
+serveri.** Hráči sa pripoja, chodia a vidia sa navzájom v okne kreslenom cez
+Vulkan, zatiaľ ako farebné kvádre. Čo sa vo svete deje, určujú Luau skripty
+v `resources/`, ktoré sa po uložení samy načítajú znova.
 
 ## Čo je v repozitári
 
@@ -15,6 +16,9 @@ farebné kvádre. Lua ešte nie je.
 | `engine/include/urt/core/` | logovanie, čas a pevný tick, platformová vrstva, job systém, argumenty |
 | `engine/include/urt/ecs/` | svet (EnTT), komponenty, rozhranie systému, `MovementSystem` |
 | `engine/include/urt/app/` | `Application`: hlavná slučka nad svetom a systémami |
+| `engine/include/urt/script/` | skripty: načítanie resources, sandbox, API `urt.*`, hot reload |
+| `resources/` | resources, ktoré server načíta: `npcs` a `welcome` ako ukážky |
+| `docs/scripting.md` | ako písať resources a čo je v API |
 | `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management, interpolácia, predikcia |
 | `docs/network.md` | popis sieťového protokolu |
 | `apps/server/` | `urt_server`, dedikovaný headless server |
@@ -29,7 +33,7 @@ farebné kvádre. Lua ešte nie je.
 - kompilátor s C++20: Visual Studio 2022, GCC 13+ alebo Clang 16+
 - [Vulkan SDK](https://vulkan.lunarg.com) pre okno klienta; bez neho zostav projekt s
   `-DURT_BUILD_RENDERER=OFF` (server, headless klient a testy)
-- Git a pripojenie na internet pri prvej konfigurácii (stiahnu sa EnTT, GLM, ENet, GLFW a doctest)
+- Git a pripojenie na internet pri prvej konfigurácii (stiahnu sa EnTT, GLM, ENet, Luau, GLFW a doctest)
 
 ## Build a spustenie
 
@@ -49,6 +53,12 @@ Spusti server a v ďalších dvoch termináloch dvoch klientov:
 ./build/dev/bin/urt_client --name Anna
 ./build/dev/bin/urt_client --name Boris
 ```
+
+Server načíta resources z priečinka `resources/`. Hľadá ho od aktuálneho
+priečinka smerom nahor; inú cestu mu dáš cez `--resources`. Ukážkové resources
+vytvoria postavy chodiace v kruhu a uvítajú každého hráča. Skús za behu servera
+zmeniť číslo v `resources/npcs/server.lua` a uložiť: postavy sa do sekundy
+vymenia. Ako písať vlastné, je v `docs/scripting.md`.
 
 Klient otvorí okno: ty si oranžový kváder, ostatní hráči a NPC modré, biela
 kocka ukazuje, kam sa kto pozerá. Chodíš klávesmi WASD alebo šípkami, F12 uloží
@@ -82,8 +92,10 @@ dva fungujú len s GCC a Clangom; po každej zmene v job systéme pusť `tsan`.
 4. **Simulácia beží v pevných tickoch.** Systémy dostanú vždy rovnaké `dt`,
    nikdy skutočný čas snímky. `Application::step()` preto dáva na každom stroji
    rovnaký výsledok a dá sa testovať.
-5. **Engine nevie nič o RP.** Joby, inventár a ekonomika budú Lua resources.
-6. **Dáta v komponentoch, logika v systémoch.** Komponent je obyčajná štruktúra
+5. **Engine nevie nič o RP.** Joby, inventár a ekonomika budú resources.
+6. **Skriptom sa neverí.** Každý resource beží vo vlastnom virtuálnom stroji
+   s limitom času a pamäte a k hre sa dostane len cez `urt.*`.
+7. **Dáta v komponentoch, logika v systémoch.** Komponent je obyčajná štruktúra
    bez metód; systém je trieda s `tick()`.
 
 ## Ako pridať systém
@@ -110,7 +122,9 @@ Systémy bežia v poradí, v akom boli pridané. Na cyklus cez veľa entít pou�
 1. ~~Jadro: CMake, platforma, job systém, ECS, logovanie, headless build~~
 2. ~~Sieť: transport, protokol, replikácia entít, interest management, okno,
    interpolácia, predikcia vlastnej postavy~~
-3. Lua resources: manifest, client/server/shared skripty, eventy a RPC, hot reload
+3. Resources v Luau
+   - ~~manifest, sandbox, skripty servera, API `urt.*`, hot reload~~
+   - skripty klienta, eventy medzi skriptom klienta a servera
 4. Renderer: ~~základ vo Vulkane (swapchain, depth, pipeline)~~, glTF, PBR, tiene, animácie
 5. Fyzika: Jolt, character controller, prvé vozidlo
 6. Svet a editor: streamovanie, editor v hre

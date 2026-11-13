@@ -10,6 +10,7 @@ add_executable(urt_tests
     test_net_interpolation.cpp
     test_net_movement.cpp
     test_net_protocol.cpp
+    test_script.cpp
     test_time.cpp)
 
 target_link_libraries(urt_tests PRIVATE urt::engine doctest::doctest urt_options)
@@ -18,7 +19,8 @@ add_test(NAME urt_tests COMMAND urt_tests)
 
 # End-to-end check: the real server binary runs a few ticks and exits cleanly.
 add_test(NAME urt_server_smoke
-    COMMAND urt_server --ticks 20 --tick-rate 100 --npcs 5000 --port 0 --log-level warn)
+    COMMAND urt_server --ticks 20 --tick-rate 100 --port 0 --log-level warn
+            --resources "${CMAKE_SOURCE_DIR}/resources")
 set_tests_properties(urt_tests urt_server_smoke PROPERTIES TIMEOUT 120)
 
 if(URT_BUILD_RENDERER)

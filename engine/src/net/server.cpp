@@ -59,7 +59,57 @@ bool Server::start() {
 NetId Server::make_networked(World& world, Entity entity) {
     const NetId id = next_net_id_++;
     world.registry.emplace_or_replace<NetworkId>(entity, id);
+    networked_[id] = entity;
     return id;
+}
+
+NetId Server::spawn(World& world, const Transform& transform) {
+    const Entity entity = world.registry.create();
+    world.registry.emplace<Transform>(entity, transform);
+    world.registry.emplace<Velocity>(entity);
+    return make_networked(world, entity);
+}
+
+Entity Server::find(World& world, NetId id) {
+    const auto found = networked_.find(id);
+    if (found == networked_.end()) {
+        return entt::null;
+    }
+    // The entity may have been destroyed behind our back, and its slot may
+    // even hold a different entity by now. Trust only a matching NetworkId.
+    const Entity entity = found->second;
+    const NetworkId* current = world.registry.valid(entity) ? world.registry.try_get<NetworkId>(entity) : nullptr;
+    if (current == nullptr || current->value != id) {
+        networked_.erase(found);
+        return entt::null;
+    }
+    return entity;
+}
+
+bool Server::despawn(World& world, NetId id) {
+    if (is_player(id)) {
+        return false;
+    }
+    const Entity entity = find(world, id);
+    if (entity == entt::null) {
+        return false;
+    }
+    world.registry.destroy(entity);
+    networked_.erase(id);
+    return true;
+}
+
+std::vector<PlayerInfo> Server::players() const {
+    std::vector<PlayerInfo> result;
+    result.reserve(player_count_);
+    for (const auto& [peer, session] : sessions_) {
+        if (session.active) {
+            result.push_back(PlayerInfo{session.player_id, session.name, session.entity});
+        }
+    }
+    // Sessions live in a hash map; sort so the order is stable for callers.
+    std::sort(result.begin(), result.end(), [](const PlayerInfo& a, const PlayerInfo& b) { return a.id < b.id; });
+    return result;
 }
 
 Entity Server::player_entity(NetId player_id) const {
@@ -72,6 +122,7 @@ Entity Server::player_entity(NetId player_id) const {
 }
 
 void Server::tick(World& world, const TickContext& context) {
+    player_events_.clear();
     events_.clear();
     transport_.poll(events_);
 
@@ -179,6 +230,7 @@ void Server::handle_hello(World& world, const TickContext& context, PeerId peer,
                                   .walk_speed = config_.walk_speed});
     transport_.send(peer, Channel::Reliable, writer_.bytes());
 
+    player_events_.push_back(PlayerEvent{PlayerEvent::Kind::Joined, id, session.name, spawn_point(id)});
     log::info("net", "'{}' joined as player {} ({} online)", session.name, id, player_count_);
 }
 
@@ -239,13 +291,17 @@ void Server::consume_inputs(World& world) {
     }
 }
 
-void Server::despawn(World& world, Session& session) {
+void Server::remove_player(World& world, Session& session) {
     if (!session.active) {
         return;
     }
+    glm::vec3 last_position{0.0f};
     if (world.registry.valid(session.entity)) {
+        last_position = world.registry.get<Transform>(session.entity).position;
         world.registry.destroy(session.entity);
     }
+    networked_.erase(session.player_id);
+    player_events_.push_back(PlayerEvent{PlayerEvent::Kind::Left, session.player_id, session.name, last_position});
     session.active = false;
     session.entity = entt::null;
     --player_count_;
@@ -258,7 +314,7 @@ void Server::remove_session(World& world, PeerId peer) {
     if (found == sessions_.end()) {
         return;
     }
-    despawn(world, found->second);
+    remove_player(world, found->second);
     sessions_.erase(found);
 }
 
@@ -275,7 +331,7 @@ void Server::kick(World& world, PeerId peer, Session& session, std::string_view 
     log::warn("net", "dropping peer {}: {}", peer, why);
     // Take the player out of the world now. Closing the connection needs the
     // other side to answer, and a hostile client could delay that for seconds.
-    despawn(world, session);
+    remove_player(world, session);
     session.kicked = true;
     transport_.disconnect(peer);
 }

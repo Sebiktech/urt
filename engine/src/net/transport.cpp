@@ -119,8 +119,10 @@ PeerId Transport::connect(const std::string& host, std::uint16_t port) {
     if (!impl_->enet_acquired || impl_->host != nullptr) {
         return 0;
     }
+    // Check for an empty name ourselves: the OS resolver disagrees about it.
+    // Linux reports an error, Windows resolves "" to the local machine.
     ENetAddress address{};
-    if (enet_address_set_host(&address, host.c_str()) != 0) {
+    if (host.empty() || enet_address_set_host(&address, host.c_str()) != 0) {
         log::error("net", "cannot resolve host '{}'", host);
         return 0;
     }

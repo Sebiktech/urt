@@ -357,15 +357,18 @@ TEST_CASE("a player whose inputs stop arriving stops moving") {
     CHECK(registry.get<Velocity>(on_server).linear.z == 0.0f);
 }
 
-TEST_CASE("connecting to a port nobody listens on fails cleanly") {
+TEST_CASE("Transport refuses an empty host name and a port that is taken") {
+    QuietLog quiet;
+
+    // Checked by Transport itself, because resolvers disagree: Linux rejects
+    // an empty name, Windows resolves it to the local machine.
     Transport transport;
-    CHECK(transport.connect("", 1) == 0);         // empty host cannot be resolved
+    CHECK(transport.connect("", 1) == 0);
     CHECK_FALSE(transport.is_open());
     CHECK_FALSE(transport.send(1, Channel::Reliable, {}));
 
     Transport first;
     REQUIRE(first.listen(0, 4));
-    QuietLog quiet;
     Transport second;
-    CHECK_FALSE(second.listen(first.port(), 4)); // port already taken
+    CHECK_FALSE(second.listen(first.port(), 4));
 }

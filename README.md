@@ -4,7 +4,8 @@ Vlastný engine, hra a editor pre roleplay servery. Server je autorita, herná
 logika beží v Lua resources a editor je klient v inom režime.
 
 Stav: **krok 1 (jadro) je hotový, z kroku 2 funguje sieťová kostra.** Hráči sa
-pripoja, chodia a vidia sa navzájom. Zatiaľ bez okna, grafiky a Lua.
+pripoja, chodia a vidia sa navzájom v jednoduchom ladiacom okne. Zatiaľ bez
+skutočnej grafiky a Lua.
 
 ## Čo je v repozitári
 
@@ -17,7 +18,7 @@ pripoja, chodia a vidia sa navzájom. Zatiaľ bez okna, grafiky a Lua.
 | `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management |
 | `docs/network.md` | popis sieťového protokolu |
 | `apps/server/` | `urt_server`, dedikovaný headless server |
-| `apps/client/` | `urt_client`, zatiaľ bez okna: pripojí sa a chodí sám ako bot |
+| `apps/client/` | `urt_client` s dočasným ladiacim oknom (`debug_view`) |
 | `tests/` | unit testy (doctest) a smoke test servera |
 | `cmake/` | prepínače kompilátora a závislosti |
 
@@ -25,7 +26,7 @@ pripoja, chodia a vidia sa navzájom. Zatiaľ bez okna, grafiky a Lua.
 
 - CMake 3.25 alebo novší
 - kompilátor s C++20: Visual Studio 2022, GCC 13+ alebo Clang 16+
-- Git a pripojenie na internet pri prvej konfigurácii (stiahnu sa EnTT, GLM, ENet a doctest)
+- Git a pripojenie na internet pri prvej konfigurácii (stiahnu sa EnTT, GLM, ENet, GLFW a doctest)
 
 ## Build a spustenie
 
@@ -46,9 +47,14 @@ Spusti server a v ďalších dvoch termináloch dvoch klientov:
 ./build/dev/bin/urt_client --name Boris
 ```
 
-Klient zatiaľ nemá okno. Chodí sám v kruhu a raz za sekundu vypíše, kde je,
-koľko entít vidí a ktorá je najbližšie. Server vypisuje, kto sa pripojil a
-odišiel. Všetko beží, kým nestlačíš Ctrl+C.
+Klient otvorí ladiace okno: ty si oranžový kváder, ostatní hráči a NPC modré.
+Chodíš klávesmi WASD alebo šípkami, Esc okno zavrie. Pohyb zatiaľ trhá, lebo
+klient kreslí presne posledný stav zo servera (interpolácia je ďalší krok).
+
+S prepínačom `--headless` klient okno neotvorí, chodí sám v kruhu a raz za
+sekundu vypíše, čo vidí. Okno je dočasné a kreslí starým OpenGL; skutočný
+renderer príde v kroku 4. Bez OpenGL sa dá projekt zostaviť s
+`-DURT_CLIENT_WINDOW=OFF`.
 
 Na iný počítač sa pripojíš cez `--connect adresa:port`; predvolený port je
 UDP 30777. Windows sa pri prvom spustení servera spýta, či mu povoliť sieť.
@@ -95,8 +101,8 @@ Systémy bežia v poradí, v akom boli pridané. Na cyklus cez veľa entít pou�
 1. ~~Jadro: CMake, platforma, job systém, ECS, logovanie, headless build~~
 2. Sieťová kostra
    - ~~transport, protokol, pripojenie, replikácia entít, interest management~~
+   - ~~ladiace okno a ovládanie z klávesnice~~
    - predikcia na klientovi a interpolácia ostatných entít
-   - jednoduché okno, ktoré kreslí entity ako kapsule
 3. Lua resources: manifest, client/server/shared skripty, eventy a RPC, hot reload
 4. Renderer: glTF, PBR, tiene, animácie
 5. Fyzika: Jolt, character controller, prvé vozidlo

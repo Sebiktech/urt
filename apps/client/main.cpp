@@ -1,19 +1,26 @@
-// urt_client: the game client. It has no window yet, so for now it plays by
-// itself: it connects, walks in a circle and prints what it sees. Run two of
-// them against one server and each reports the other.
+// urt_client: the game client. By default it opens a debug window and you
+// walk with WASD or the arrow keys. With --headless (or when built without
+// the window) it plays by itself: it walks in a circle and prints what it sees.
 
 #include "urt/app/application.hpp"
 #include "urt/core/args.hpp"
 #include "urt/core/log.hpp"
+#include "urt/core/platform.hpp"
+#include "urt/core/time.hpp"
 #include "urt/ecs/components.hpp"
 #include "urt/net/client.hpp"
 #include "urt/net/components.hpp"
+
+#if defined(URT_CLIENT_WINDOW)
+#include "debug_view.hpp"
+#endif
 
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <format>
 #include <limits>
 #include <optional>
 #include <string>
@@ -27,7 +34,8 @@ void print_usage() {
               "Options:\n"
               "  --connect <host[:port]>  server address (default 127.0.0.1:30777)\n"
               "  --name <text>            player name (default player)\n"
-              "  --ticks <n>              stop after n ticks (default: run until Ctrl+C)\n"
+              "  --headless               no window: walk in a circle and print what is seen\n"
+              "  --ticks <n>              headless only: stop after n ticks\n"
               "  --log-level <level>      trace, debug, info, warn, error, off (default info)\n"
               "  --help                   show this text");
 }
@@ -119,6 +127,49 @@ private:
     bool lost_connection_ = false;
 };
 
+#if defined(URT_CLIENT_WINDOW)
+// The windowed main loop. Application::run() sleeps between ticks, which is
+// right for a server; here every screen refresh draws a frame, and the fixed
+// timestep decides how many simulation ticks fit in between.
+// Returns false if the window could not be opened.
+bool run_windowed(urt::Application& app, urt::net::Client& client, bool& lost_connection) {
+    DebugView view;
+    if (!view.open(1280, 720, "URT")) {
+        return false;
+    }
+    urt::platform::install_shutdown_handler();
+    urt::log::info("client", "walk with WASD or the arrow keys, Esc quits");
+
+    urt::FixedTimestep timestep(app.config().tick_rate);
+    urt::Clock::time_point last = urt::Clock::now();
+    float yaw = 0.0f;
+    std::uint64_t frame = 0;
+
+    while (!view.should_close() && !urt::platform::shutdown_requested()) {
+        if (client.state() == urt::net::ClientState::Disconnected) {
+            lost_connection = true;
+            break;
+        }
+
+        const urt::MoveIntent intent = urt::to_intent(view.poll_keys(), yaw);
+        yaw = intent.yaw;
+        client.set_input(intent.x, intent.z, intent.yaw);
+
+        const urt::Clock::time_point now = urt::Clock::now();
+        app.step(static_cast<std::uint64_t>(timestep.advance(now - last)));
+        last = now;
+
+        view.draw(app.world(), client.player_entity());
+
+        if (++frame % 30 == 0) {
+            view.set_title(std::format("URT - player {} - {} entities visible", client.player_id(),
+                                       client.visible_count()));
+        }
+    }
+    return true;
+}
+#endif
+
 int run_client(const urt::Args& args) {
     if (args.has("help")) {
         print_usage();
@@ -163,11 +214,22 @@ int run_client(const urt::Args& args) {
 
     urt::Application app(config);
     auto& client = app.add_system<urt::net::Client>(net_config);
-    auto& bot = app.add_system<BotSystem>(app, client);
 
     if (!client.connect()) {
         return 1;
     }
+
+#if defined(URT_CLIENT_WINDOW)
+    if (!args.has("headless")) {
+        bool lost_connection = false;
+        if (run_windowed(app, client, lost_connection)) {
+            return lost_connection ? 1 : 0;
+        }
+        urt::log::warn("client", "cannot open a window, continuing headless");
+    }
+#endif
+
+    auto& bot = app.add_system<BotSystem>(app, client);
     app.run();
     return bot.lost_connection() ? 1 : 0;
 }

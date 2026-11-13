@@ -2,6 +2,7 @@ add_executable(urt_tests
     main.cpp
     test_application.cpp
     test_args.cpp
+    test_input.cpp
     test_jobs.cpp
     test_log.cpp
     test_net_grid.cpp

@@ -1,5 +1,5 @@
-// urt_client: the game client. By default it opens a debug window and you
-// walk with WASD or the arrow keys. With --headless (or when built without
+// urt_client: the game client. By default it opens a window and you walk
+// with WASD or the arrow keys. With --headless (or when built without
 // the window) it plays by itself: it walks in a circle and prints what it sees.
 
 #include "urt/app/application.hpp"
@@ -12,10 +12,13 @@
 #include "urt/net/components.hpp"
 
 #if defined(URT_CLIENT_WINDOW)
-#include "debug_view.hpp"
+#include "game_window.hpp"
+#include "urt/render/renderer.hpp"
+#include "world_view.hpp"
 #endif
 
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +28,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -35,6 +40,7 @@ void print_usage() {
               "  --connect <host[:port]>  server address (default 127.0.0.1:30777)\n"
               "  --name <text>            player name (default player)\n"
               "  --headless               no window: walk in a circle and print what is seen\n"
+              "  --validate               check Vulkan usage (needs the Vulkan SDK; on in debug builds)\n"
               "  --ticks <n>              headless only: stop after n ticks\n"
               "  --log-level <level>      trace, debug, info, warn, error, off (default info)\n"
               "  --help                   show this text");
@@ -131,39 +137,57 @@ private:
 // The windowed main loop. Application::run() sleeps between ticks, which is
 // right for a server; here every screen refresh draws a frame, and the fixed
 // timestep decides how many simulation ticks fit in between.
-// Returns false if the window could not be opened.
-bool run_windowed(urt::Application& app, urt::net::Client& client, bool& lost_connection) {
-    DebugView view;
-    if (!view.open(1280, 720, "URT")) {
+// Returns false if the window or the renderer could not be started.
+bool run_windowed(urt::Application& app, urt::net::Client& client, bool validate, bool& lost_connection) {
+    // Order matters: the renderer is destroyed first, then the window.
+    GameWindow window;
+    if (!window.open(1280, 720, "URT")) {
+        return false;
+    }
+    urt::render::Renderer renderer;
+    if (!renderer.init(window.surface_provider(), {.validation = validate})) {
         return false;
     }
     urt::platform::install_shutdown_handler();
-    urt::log::info("client", "walk with WASD or the arrow keys, Esc quits");
+    urt::log::info("client", "walk with WASD or the arrow keys, F12 saves a screenshot, Esc quits");
 
     urt::FixedTimestep timestep(app.config().tick_rate);
+    WorldView view;
     urt::Clock::time_point last = urt::Clock::now();
     float yaw = 0.0f;
     std::uint64_t frame = 0;
 
-    while (!view.should_close() && !urt::platform::shutdown_requested()) {
+    while (!window.should_close() && !urt::platform::shutdown_requested()) {
         if (client.state() == urt::net::ClientState::Disconnected) {
             lost_connection = true;
             break;
         }
 
-        const urt::MoveIntent intent = urt::to_intent(view.poll_keys(), yaw);
+        const urt::MoveIntent intent = urt::to_intent(window.poll_keys(), yaw);
         yaw = intent.yaw;
         client.set_input(intent.x, intent.z, intent.yaw);
 
         const urt::Clock::time_point now = urt::Clock::now();
-        app.step(static_cast<std::uint64_t>(timestep.advance(now - last)));
+        const urt::Nanoseconds elapsed = now - last;
         last = now;
+        app.step(static_cast<std::uint64_t>(timestep.advance(elapsed)));
+        view.update(std::chrono::duration<double>(elapsed).count(), client, app.world());
 
-        view.draw(app.world(), client.player_entity());
+        if (window.screenshot_pressed()) {
+            renderer.request_screenshot("urt_screenshot.ppm");
+        }
+        if (!renderer.draw_frame(view.camera(), view.boxes())) {
+            urt::log::error("client", "the renderer stopped working");
+            break;
+        }
+        if (window.is_minimised()) {
+            // Nothing is drawn, so nothing waits for the screen either.
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
 
         if (++frame % 30 == 0) {
-            view.set_title(std::format("URT - player {} - {} entities visible", client.player_id(),
-                                       client.visible_count()));
+            window.set_title(std::format("URT - player {} - {} entities visible", client.player_id(),
+                                         client.visible_count()));
         }
     }
     return true;
@@ -222,7 +246,12 @@ int run_client(const urt::Args& args) {
 #if defined(URT_CLIENT_WINDOW)
     if (!args.has("headless")) {
         bool lost_connection = false;
-        if (run_windowed(app, client, lost_connection)) {
+#if defined(NDEBUG)
+        const bool validate = args.has("validate");
+#else
+        const bool validate = true;
+#endif
+        if (run_windowed(app, client, validate, lost_connection)) {
             return lost_connection ? 1 : 0;
         }
         urt::log::warn("client", "cannot open a window, continuing headless");

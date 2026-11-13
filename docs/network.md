@@ -98,9 +98,9 @@ alebo odišla z dosahu. Klient ju zmaže a pri návrate si ju vytvorí znova.
 
 ## Čo zatiaľ chýba
 
-- **Predikcia a interpolácia.** Klient ukazuje presne posledný snapshot, takže
-  pohyb je oneskorený o cestu po sieti a pri strate paketu trhne. Pole
-  „posledný spracovaný vstup" je pripravené pre predikciu.
+- **Predikcia.** Ostatné entity klient kreslí plynulo (interpolácia medzi
+  snapshotmi, 0,1 s v minulosti), ale vlastná postava reaguje až po ceste na
+  server a späť. Pole „posledný spracovaný vstup" je pripravené pre predikciu.
 - **Delta kompresia.** Posiela sa vždy celý stav okolia, čo je 32 bajtov na
   entitu 30× za sekundu. Pri stovkách entít nablízku to bude priveľa.
 - **Šifrovanie a prihlásenie.** Meno hráča si klient zvolí sám a nič ho

@@ -15,6 +15,7 @@ add_library(urt_engine STATIC
     src/net/bytes.cpp
     src/net/client.cpp
     src/net/interest_grid.cpp
+    src/net/interpolation.cpp
     src/net/protocol.cpp
     src/net/server.cpp
     src/net/transport.cpp)

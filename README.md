@@ -4,8 +4,8 @@ Vlastný engine, hra a editor pre roleplay servery. Server je autorita, herná
 logika beží v Lua resources a editor je klient v inom režime.
 
 Stav: **krok 1 (jadro) je hotový, z kroku 2 funguje sieťová kostra.** Hráči sa
-pripoja, chodia a vidia sa navzájom v jednoduchom ladiacom okne. Zatiaľ bez
-skutočnej grafiky a Lua.
+pripoja, chodia a vidia sa navzájom v okne kreslenom cez Vulkan, zatiaľ ako
+farebné kvádre. Lua ešte nie je.
 
 ## Čo je v repozitári
 
@@ -15,10 +15,11 @@ skutočnej grafiky a Lua.
 | `engine/include/urt/core/` | logovanie, čas a pevný tick, platformová vrstva, job systém, argumenty |
 | `engine/include/urt/ecs/` | svet (EnTT), komponenty, rozhranie systému, `MovementSystem` |
 | `engine/include/urt/app/` | `Application`: hlavná slučka nad svetom a systémami |
-| `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management |
+| `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management, interpolácia |
 | `docs/network.md` | popis sieťového protokolu |
 | `apps/server/` | `urt_server`, dedikovaný headless server |
-| `apps/client/` | `urt_client` s dočasným ladiacim oknom (`debug_view`) |
+| `render/` | knižnica `urt_render`: Vulkan renderer, linkuje ju len klient |
+| `apps/client/` | `urt_client`: okno (GLFW), ovládanie, kreslenie sveta |
 | `tests/` | unit testy (doctest) a smoke test servera |
 | `cmake/` | prepínače kompilátora a závislosti |
 
@@ -26,6 +27,8 @@ skutočnej grafiky a Lua.
 
 - CMake 3.25 alebo novší
 - kompilátor s C++20: Visual Studio 2022, GCC 13+ alebo Clang 16+
+- [Vulkan SDK](https://vulkan.lunarg.com) pre okno klienta; bez neho zostav projekt s
+  `-DURT_BUILD_RENDERER=OFF` (server, headless klient a testy)
 - Git a pripojenie na internet pri prvej konfigurácii (stiahnu sa EnTT, GLM, ENet, GLFW a doctest)
 
 ## Build a spustenie
@@ -47,14 +50,17 @@ Spusti server a v ďalších dvoch termináloch dvoch klientov:
 ./build/dev/bin/urt_client --name Boris
 ```
 
-Klient otvorí ladiace okno: ty si oranžový kváder, ostatní hráči a NPC modré.
-Chodíš klávesmi WASD alebo šípkami, Esc okno zavrie. Pohyb zatiaľ trhá, lebo
-klient kreslí presne posledný stav zo servera (interpolácia je ďalší krok).
+Klient otvorí okno: ty si oranžový kváder, ostatní hráči a NPC modré, biela
+kocka ukazuje, kam sa kto pozerá. Chodíš klávesmi WASD alebo šípkami, F12 uloží
+snímku do `urt_screenshot.ppm`, Esc okno zavrie.
+
+Ostatné entity sa hýbu plynulo, lebo klient ich kreslí 0,1 s v minulosti a
+polohu dopočítava medzi dvoma snapshotmi. Vlastná postava reaguje s rovnakým
+oneskorením plus cestou po sieti; to odstráni až predikcia.
 
 S prepínačom `--headless` klient okno neotvorí, chodí sám v kruhu a raz za
-sekundu vypíše, čo vidí. Okno je dočasné a kreslí starým OpenGL; skutočný
-renderer príde v kroku 4. Bez OpenGL sa dá projekt zostaviť s
-`-DURT_CLIENT_WINDOW=OFF`.
+sekundu vypíše, čo vidí. `--validate` zapne kontrolu volaní Vulkanu (v debug
+builde je zapnutá vždy, potrebuje Vulkan SDK) a chyby vypíše do konzoly.
 
 Na iný počítač sa pripojíš cez `--connect adresa:port`; predvolený port je
 UDP 30777. Windows sa pri prvom spustení servera spýta, či mu povoliť sieť.
@@ -66,8 +72,10 @@ dva fungujú len s GCC a Clangom; po každej zmene v job systéme pusť `tsan`.
 ## Pravidlá architektúry
 
 1. **Server je autorita.** Klient posiela vstupy, server rozhoduje o stave.
-2. **`urt_engine` nesmie obsahovať okno ani grafiku.** Renderer bude samostatná
-   knižnica, ktorú linkuje len klient, aby server bežal aj bez GPU.
+2. **`urt_engine` nesmie obsahovať okno ani grafiku.** Renderer je samostatná
+   knižnica `urt_render`, ktorú linkuje len klient, aby server bežal aj bez GPU.
+   Renderer zasa nevie nič o okne, sieti ani ECS: dostane kameru a zoznam vecí
+   na kreslenie.
 3. **Server klientovi neverí.** Každý paket sa overí skôr, než sa použije;
    podrobnosti sú v `docs/network.md`.
 4. **Simulácia beží v pevných tickoch.** Systémy dostanú vždy rovnaké `dt`,
@@ -101,10 +109,10 @@ Systémy bežia v poradí, v akom boli pridané. Na cyklus cez veľa entít pou�
 1. ~~Jadro: CMake, platforma, job systém, ECS, logovanie, headless build~~
 2. Sieťová kostra
    - ~~transport, protokol, pripojenie, replikácia entít, interest management~~
-   - ~~ladiace okno a ovládanie z klávesnice~~
-   - predikcia na klientovi a interpolácia ostatných entít
+   - ~~okno, ovládanie z klávesnice, interpolácia entít~~
+   - predikcia vlastnej postavy na klientovi
 3. Lua resources: manifest, client/server/shared skripty, eventy a RPC, hot reload
-4. Renderer: glTF, PBR, tiene, animácie
+4. Renderer: ~~základ vo Vulkane (swapchain, depth, pipeline)~~, glTF, PBR, tiene, animácie
 5. Fyzika: Jolt, character controller, prvé vozidlo
 6. Svet a editor: streamovanie, editor v hre
 7. Služby: účty, práva, PostgreSQL, UI pre skripty, hlas

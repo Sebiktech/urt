@@ -68,6 +68,12 @@ public:
     std::uint32_t last_snapshot_tick() const { return last_snapshot_tick_; }
     std::uint64_t snapshots_received() const { return snapshots_received_; }
 
+    // Server time of the newest snapshot, in seconds: its tick divided by the
+    // server's tick rate. 0 before the first snapshot.
+    double latest_server_time() const {
+        return server_tick_rate_ != 0 ? static_cast<double>(last_snapshot_tick_) / server_tick_rate_ : 0.0;
+    }
+
     // What the player wants to do. Sent to the server every tick until changed.
     // move_x and move_z are a world-space direction, each in -1..1.
     void set_input(float move_x, float move_z, float yaw);

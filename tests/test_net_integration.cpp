@@ -9,6 +9,7 @@
 #include "urt/ecs/movement_system.hpp"
 #include "urt/net/client.hpp"
 #include "urt/net/components.hpp"
+#include "urt/net/interpolation.hpp"
 #include "urt/net/server.hpp"
 #include "urt/net/transport.hpp"
 
@@ -154,6 +155,17 @@ TEST_CASE("two clients connect, see each other and move with server authority") 
     REQUIRE(seen != nullptr);
     CHECK(std::abs(seen->position.x - truth.position.x) < 0.5f);
     CHECK(seen->yaw == doctest::Approx(1.0f));
+
+    // The client also keeps where Anna was a moment ago, for smooth drawing:
+    // 0.1 s back she was about 0.4 m (4 m/s) behind where she is now.
+    const auto& history = boris.app.world().registry.get<PoseHistory>(boris.client.find(anna.client.player_id()));
+    CHECK(history.size() == PoseHistory::capacity);
+    Pose now_pose;
+    Pose earlier_pose;
+    REQUIRE(history.sample(boris.client.latest_server_time(), now_pose));
+    REQUIRE(history.sample(boris.client.latest_server_time() - 0.1, earlier_pose));
+    CHECK(now_pose.position.x == seen->position.x);
+    CHECK(now_pose.position.x - earlier_pose.position.x == doctest::Approx(0.4f).epsilon(0.05));
 
     // Stop, let everything settle, then the views must match exactly.
     anna.client.set_input(0.0f, 0.0f, 1.0f);

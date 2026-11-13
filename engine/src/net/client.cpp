@@ -3,6 +3,7 @@
 #include "urt/core/log.hpp"
 #include "urt/ecs/components.hpp"
 #include "urt/net/components.hpp"
+#include "urt/net/interpolation.hpp"
 
 #include <utility>
 
@@ -149,6 +150,7 @@ void Client::handle_packet(World& world, Channel channel, std::span<const std::u
 
 void Client::apply_snapshot(World& world, const ServerSnapshot& snapshot) {
     auto& registry = world.registry;
+    const double snapshot_time = static_cast<double>(snapshot.server_tick) / server_tick_rate_;
 
     for (const SnapshotEntity& remote : snapshot.entities) {
         Replicated& local = entities_[remote.id];
@@ -158,6 +160,7 @@ void Client::apply_snapshot(World& world, const ServerSnapshot& snapshot) {
             registry.emplace<NetworkId>(local.entity, remote.id);
             registry.emplace<Transform>(local.entity);
             registry.emplace<Velocity>(local.entity);
+            registry.emplace<PoseHistory>(local.entity);
             if (remote.id == player_id_) {
                 registry.emplace<LocalPlayer>(local.entity);
                 player_entity_ = local.entity;
@@ -169,6 +172,9 @@ void Client::apply_snapshot(World& world, const ServerSnapshot& snapshot) {
         transform.position = remote.position;
         transform.yaw = remote.yaw;
         registry.get<Velocity>(local.entity).linear = remote.velocity;
+        // Remember the pose with its time, for smooth drawing between snapshots.
+        registry.get<PoseHistory>(local.entity)
+            .push(snapshot_time, Pose{.position = remote.position, .yaw = remote.yaw});
     }
 
     // Whatever the snapshot no longer mentions has left our surroundings.

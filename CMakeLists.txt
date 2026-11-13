@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(URT
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Universal Roleplay Tool - engine, game and editor"
     LANGUAGES CXX)
 
@@ -14,12 +14,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 option(URT_BUILD_TESTS "Build unit tests" ON)
+option(URT_BUILD_RENDERER "Build the Vulkan renderer and the client window (needs the Vulkan SDK)" ON)
 set(URT_SANITIZE "" CACHE STRING "Sanitizer to enable: address, thread or empty")
 
 include(cmake/CompilerOptions.cmake)
 include(cmake/Dependencies.cmake)
 
 add_subdirectory(engine)
+if(URT_BUILD_RENDERER)
+    add_subdirectory(render)
+endif()
 add_subdirectory(apps/server)
 add_subdirectory(apps/client)
 

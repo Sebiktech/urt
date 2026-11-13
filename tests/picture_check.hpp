@@ -31,6 +31,7 @@ inline bool read_ppm(const std::string& path, Image& image) {
 struct Counts {
     int orange = 0;
     int blue = 0;
+    int green = 0;
     int ground = 0;
     int grid = 0;
     double orange_x = 0.0; // centre of the orange pixels, in pixels
@@ -55,6 +56,8 @@ inline Counts classify(const Image& image) {
                 sum_y += y;
             } else if (b > 90 && b > g * 14 / 10 && g > r * 15 / 10) {
                 ++counts.blue; // other entities: (0.3, 0.6, 1.0)
+            } else if (g > 90 && g > r * 15 / 10 && g > b * 15 / 10) {
+                ++counts.green; // an entity a script coloured (0.3, 0.9, 0.4)
             } else if (r >= 38 && r <= 44 && g >= 41 && g <= 46 && b >= 48 && b <= 54) {
                 ++counts.ground; // (0.16, 0.17, 0.20)
             } else if (r >= 60 && r <= 78 && g >= 62 && g <= 80 && b >= 70 && b <= 88) {

@@ -3,10 +3,10 @@
 Vlastný engine, hra a editor pre roleplay servery. Server je autorita, herná
 logika beží v skriptoch (resources) a editor je klient v inom režime.
 
-Stav: **kroky 1 (jadro) a 2 (sieť) sú hotové, z kroku 3 fungujú skripty na
-serveri.** Hráči sa pripoja, chodia a vidia sa navzájom v okne kreslenom cez
-Vulkan, zatiaľ ako farebné kvádre. Čo sa vo svete deje, určujú Luau skripty
-v `resources/`, ktoré sa po uložení samy načítajú znova.
+Stav: **kroky 1 (jadro), 2 (sieť) a 3 (skripty) sú hotové.** Hráči sa pripoja,
+chodia a vidia sa navzájom v okne kreslenom cez Vulkan, zatiaľ ako farebné
+kvádre. Čo sa vo svete deje, určujú Luau skripty v `resources/`: časť beží na
+serveri, časť server pošle klientom, a po uložení súboru sa načítajú znova.
 
 ## Čo je v repozitári
 
@@ -16,7 +16,7 @@ v `resources/`, ktoré sa po uložení samy načítajú znova.
 | `engine/include/urt/core/` | logovanie, čas a pevný tick, platformová vrstva, job systém, argumenty |
 | `engine/include/urt/ecs/` | svet (EnTT), komponenty, rozhranie systému, `MovementSystem` |
 | `engine/include/urt/app/` | `Application`: hlavná slučka nad svetom a systémami |
-| `engine/include/urt/script/` | skripty: načítanie resources, sandbox, API `urt.*`, hot reload |
+| `engine/include/urt/script/` | skripty servera a klienta: resources, sandbox, API `urt.*`, hot reload |
 | `resources/` | resources, ktoré server načíta: `npcs` a `welcome` ako ukážky |
 | `docs/scripting.md` | ako písať resources a čo je v API |
 | `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management, interpolácia, predikcia |
@@ -56,7 +56,8 @@ Spusti server a v ďalších dvoch termináloch dvoch klientov:
 
 Server načíta resources z priečinka `resources/`. Hľadá ho od aktuálneho
 priečinka smerom nahor; inú cestu mu dáš cez `--resources`. Ukážkové resources
-vytvoria postavy chodiace v kruhu a uvítajú každého hráča. Skús za behu servera
+vytvoria postavy chodiace v kruhu a ku každému novému hráčovi postavia zelenú
+postavu, ktorú zafarbí skript bežiaci u klienta. Skús za behu servera
 zmeniť číslo v `resources/npcs/server.lua` a uložiť: postavy sa do sekundy
 vymenia. Ako písať vlastné, je v `docs/scripting.md`.
 
@@ -122,9 +123,8 @@ Systémy bežia v poradí, v akom boli pridané. Na cyklus cez veľa entít pou�
 1. ~~Jadro: CMake, platforma, job systém, ECS, logovanie, headless build~~
 2. ~~Sieť: transport, protokol, replikácia entít, interest management, okno,
    interpolácia, predikcia vlastnej postavy~~
-3. Resources v Luau
-   - ~~manifest, sandbox, skripty servera, API `urt.*`, hot reload~~
-   - skripty klienta, eventy medzi skriptom klienta a servera
+3. ~~Resources v Luau: manifest, sandbox, skripty servera a klienta, API
+   `urt.*`, eventy medzi klientom a serverom, hot reload~~
 4. Renderer: ~~základ vo Vulkane (swapchain, depth, pipeline)~~, glTF, PBR, tiene, animácie
 5. Fyzika: Jolt, character controller, prvé vozidlo
 6. Svet a editor: streamovanie, editor v hre

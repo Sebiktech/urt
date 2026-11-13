@@ -19,6 +19,10 @@ constexpr std::size_t input_redundancy = 4;
 // Unconfirmed commands kept for replay: about two seconds at 30 ticks/s.
 constexpr std::size_t max_pending_inputs = 64;
 
+// Script messages kept while nobody collects them (a client without a script
+// system). Beyond this the oldest are forgotten.
+constexpr std::size_t max_waiting_script_messages = 4096;
+
 // A correction larger than this is not hidden but shown at once: the server
 // moved the player on purpose (a teleport), or we were badly out of step.
 constexpr float snap_distance = 3.0f;
@@ -246,11 +250,56 @@ void Client::handle_packet(World& world, Channel channel, std::span<const std::u
         apply_snapshot(world, snapshot_);
         return;
     }
+    case MessageType::ServerResourceStart:
+    case MessageType::ServerResourceStop:
+    case MessageType::NetEvent: {
+        // Scripts only run once we are in the game. A message that does not
+        // decode is ignored: the server may be buggy or hostile, and neither
+        // is a reason to act on bad data.
+        if (channel != Channel::Reliable || state_ != ClientState::Connected) {
+            return;
+        }
+        ScriptMessage message;
+        if (message_type(data) == MessageType::ServerResourceStart) {
+            message.kind = ScriptMessage::Kind::ResourceStart;
+            if (!decode(data, message.start)) {
+                return;
+            }
+        } else if (message_type(data) == MessageType::ServerResourceStop) {
+            message.kind = ScriptMessage::Kind::ResourceStop;
+            ServerResourceStop stop;
+            if (!decode(data, stop)) {
+                return;
+            }
+            message.resource = std::move(stop.resource);
+        } else {
+            message.kind = ScriptMessage::Kind::Event;
+            if (!decode(data, message.event)) {
+                return;
+            }
+        }
+        if (script_messages_.size() >= max_waiting_script_messages) {
+            script_messages_.erase(script_messages_.begin());
+        }
+        script_messages_.push_back(std::move(message));
+        return;
+    }
     case MessageType::ClientHello:
     case MessageType::ClientInput:
     case MessageType::Invalid:
         return;
     }
+}
+
+std::vector<ScriptMessage> Client::take_script_messages() { return std::exchange(script_messages_, {}); }
+
+bool Client::send_event(const NetEvent& event) {
+    if (state_ != ClientState::Connected) {
+        return false;
+    }
+    ByteWriter writer;
+    encode(writer, event);
+    return transport_.send(server_peer_, Channel::Reliable, writer.bytes());
 }
 
 void Client::apply_snapshot(World& world, const ServerSnapshot& snapshot) {
@@ -318,6 +367,10 @@ void Client::clear_world(World& world) {
     player_entity_ = entt::null;
     player_id_ = 0;
     has_snapshot_ = false;
+
+    // Whatever scripts the server gave us end with the connection.
+    script_messages_.clear();
+    script_messages_.push_back(ScriptMessage{}); // Kind::Reset
 
     pending_.clear();
     sequence_ = 0;

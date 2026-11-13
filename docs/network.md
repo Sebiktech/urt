@@ -1,4 +1,4 @@
-# Sieťový protokol URT (verzia 2)
+# Sieťový protokol URT (verzia 3)
 
 Tento dokument popisuje, čo si klient a server posielajú. Kód je v
 `engine/include/urt/net/` a `engine/src/net/`; pri každej zmene protokolu uprav
@@ -40,6 +40,13 @@ bajt dĺžky a potom znaky.
 | 3 | `ServerReject` | server → klient | 0 | `u8` dôvod: 1 verzia, 2 plný server, 3 zlé meno |
 | 4 | `ClientInput` | klient → server | 1 | `u32` poradie posledného príkazu, `u8` počet (1 až 8), príkazy |
 | 5 | `ServerSnapshot` | server → klient | 1 | `u32` tick, `u32` posledný spracovaný vstup, `u16` počet, entity |
+| 6 | `ServerResourceStart` | server → klient | 0 | `string` meno resource, `u8` počet skriptov, skripty |
+| 7 | `ServerResourceStop` | server → klient | 0 | `string` meno resource |
+| 8 | `NetEvent` | oboma smermi | 0 | `string` meno eventu, `blob` argumenty |
+
+`blob` je `u32` dĺžka a potom bajty. Skript v `ServerResourceStart` je
+`string` meno (pre chybové hlášky) a `blob` so zdrojovým textom, najviac 1 MB;
+resource má najviac 64 skriptov klienta.
 
 Príkaz v `ClientInput` má 12 bajtov: `f32` move_x, `f32` move_z, `f32` yaw.
 Príkazy idú od najstaršieho po najnovší.
@@ -116,13 +123,47 @@ Predikcia zatiaľ pokrýva len chôdzu. Všetko, čo neskôr ovplyvní pohyb hr�
 (kolízie, fyzika, vozidlá), musí bežať rovnakým kódom na oboch stranách, inak
 bude server klienta neustále opravovať.
 
+## Skripty a eventy
+
+Po `ServerWelcome` pošle server klientovi `ServerResourceStart` za každý
+bežiaci resource, ktorý má skripty klienta. Rovnakú správu pošle všetkým pri
+štarte alebo reloade resource; klient vtedy starú verziu zastaví a spustí
+novú. `ServerResourceStop` príde, keď sa resource na serveri zastaví.
+
+`NetEvent` nesie event medzi skriptami. Sieťová vrstva overí meno (1 až 64
+tlačiteľných znakov bez medzier) a veľkosť argumentov (najviac 16 KB); obsah
+argumentov dekóduje až skriptová vrstva. Formát argumentov: `u8` počet, potom
+hodnoty, každá začína bajtom typu:
+
+| Typ | Hodnota | Nasleduje |
+|---|---|---|
+| 0 | `nil` | nič |
+| 1, 2 | `false`, `true` | nič |
+| 3 | číslo | `f64` |
+| 4 | reťazec | `u16` dĺžka, bajty |
+| 5 | tabuľka | `u16` počet párov, potom kľúč a hodnota za každý pár |
+
+Kľúč tabuľky je číslo alebo reťazec. Dekodér najprv overí celé kódovanie
+vrátane limitov (hĺbka 8, 2048 hodnôt, reťazec 8 KB) a až potom vytvára
+hodnoty, takže poškodené dáta po sebe nič nezanechajú. Event s neplatnými
+argumentmi sa handleru nedoručí.
+
+Server prijme od klienta najviac 30 eventov za sekundu so zásobou 60. Ďalšie
+zahodí; po 300 zahodených klienta odpojí.
+
+Klient serveru neverí o nič viac než server klientovi: správy, ktoré sa
+nedajú dekódovať alebo prekračujú limity, ignoruje, a skripty spúšťa
+v sandboxe s limitom času a pamäte.
+
 ## Čo server považuje za porušenie protokolu
 
 Spojenie sa zavrie a hráč sa okamžite odstráni zo sveta, keď príde:
 
 - neznámy typ správy alebo správa určená klientovi,
 - `ClientHello` na nesprávnom kanáli, poškodený alebo druhýkrát,
-- `ClientInput` pred dokončením handshaku alebo na nesprávnom kanáli.
+- `ClientInput` pred dokončením handshaku alebo na nesprávnom kanáli,
+- `NetEvent` pred dokončením handshaku, na nesprávnom kanáli alebo taký, ktorý
+  sa nedá dekódovať.
 
 Poškodený `ClientInput` sa len zahodí, lebo nespoľahlivý paket sa môže
 poškodiť aj bez zlého úmyslu. Jeho príkazy zopakuje ďalší paket.
@@ -140,6 +181,8 @@ alebo odišla z dosahu. Klient ju zmaže a pri návrate si ju vytvorí znova.
 
 - **Delta kompresia.** Posiela sa vždy celý stav okolia, čo je 32 bajtov na
   entitu 30× za sekundu. Pri stovkách entít nablízku to bude priveľa.
+- **Cache skriptov.** Skripty klienta sa posielajú celé pri každom pripojení a
+  reloade, bez kompresie a bez kontroly, či ich klient už má.
 - **Šifrovanie a prihlásenie.** Meno hráča si klient zvolí sám a nič ho
   neoveruje. Server preto zatiaľ nepúšťaj do verejného internetu.
 - **IPv6.** ENet 1.3 vie len IPv4.

@@ -24,6 +24,23 @@ void ByteWriter::f32(float value) {
     u32(std::bit_cast<std::uint32_t>(value));
 }
 
+void ByteWriter::f64(double value) {
+    const auto bits = std::bit_cast<std::uint64_t>(value);
+    for (int shift = 0; shift < 64; shift += 8) {
+        buffer_.push_back(static_cast<std::uint8_t>((bits >> shift) & 0xFF));
+    }
+}
+
+void ByteWriter::blob(std::string_view data) {
+    u32(static_cast<std::uint32_t>(data.size()));
+    buffer_.insert(buffer_.end(), data.begin(), data.end());
+}
+
+void ByteWriter::blob(std::span<const std::uint8_t> data) {
+    u32(static_cast<std::uint32_t>(data.size()));
+    buffer_.insert(buffer_.end(), data.begin(), data.end());
+}
+
 void ByteWriter::string(std::string_view text) {
     const std::size_t length = std::min<std::size_t>(text.size(), 255);
     u8(static_cast<std::uint8_t>(length));
@@ -69,6 +86,45 @@ float ByteReader::f32() {
         return 0.0f;
     }
     return value;
+}
+
+double ByteReader::f64() {
+    const std::uint8_t* bytes = take(8);
+    if (bytes == nullptr) {
+        return 0.0;
+    }
+    std::uint64_t bits = 0;
+    for (int i = 0; i < 8; ++i) {
+        bits |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    }
+    const double value = std::bit_cast<double>(bits);
+    if (!std::isfinite(value)) {
+        ok_ = false;
+        return 0.0;
+    }
+    return value;
+}
+
+std::string ByteReader::blob(std::size_t max_length) {
+    const std::size_t length = u32();
+    if (!ok_ || length > max_length) {
+        ok_ = false;
+        return {};
+    }
+    const std::uint8_t* bytes = take(length);
+    if (bytes == nullptr) {
+        return {};
+    }
+    return std::string(reinterpret_cast<const char*>(bytes), length);
+}
+
+std::span<const std::uint8_t> ByteReader::rest() {
+    if (!ok_) {
+        return {};
+    }
+    const std::span<const std::uint8_t> remaining = data_.subspan(position_);
+    position_ = data_.size();
+    return remaining;
 }
 
 std::string ByteReader::string(std::size_t max_length) {

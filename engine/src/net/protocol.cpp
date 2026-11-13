@@ -44,11 +44,30 @@ MessageType message_type(std::span<const std::uint8_t> packet) {
     case MessageType::ServerReject:
     case MessageType::ClientInput:
     case MessageType::ServerSnapshot:
+    case MessageType::ServerResourceStart:
+    case MessageType::ServerResourceStop:
+    case MessageType::NetEvent:
         return static_cast<MessageType>(packet[0]);
     case MessageType::Invalid:
         break;
     }
     return MessageType::Invalid;
+}
+
+bool valid_resource_name(std::string_view name) {
+    if (name.empty() || name.size() > max_resource_name_length) {
+        return false;
+    }
+    return std::all_of(name.begin(), name.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    });
+}
+
+bool valid_event_name(std::string_view name) {
+    if (name.empty() || name.size() > max_event_name_length) {
+        return false;
+    }
+    return std::all_of(name.begin(), name.end(), [](char c) { return c > 0x20 && c < 0x7F; });
 }
 
 void encode(ByteWriter& out, const ClientHello& message) {
@@ -205,6 +224,87 @@ bool decode(std::span<const std::uint8_t> packet, ServerSnapshot& out) {
     if (!reader.finished()) {
         return false;
     }
+    out = std::move(message);
+    return true;
+}
+
+void encode(ByteWriter& out, const ServerResourceStart& message) {
+    const std::size_t count = std::min(message.scripts.size(), max_client_scripts);
+    write_type(out, MessageType::ServerResourceStart);
+    out.string(message.resource);
+    out.u8(static_cast<std::uint8_t>(count));
+    for (std::size_t i = 0; i < count; ++i) {
+        out.string(message.scripts[i].name);
+        out.blob(message.scripts[i].source);
+    }
+}
+
+bool decode(std::span<const std::uint8_t> packet, ServerResourceStart& out) {
+    ByteReader reader(packet);
+    if (!begin(reader, MessageType::ServerResourceStart)) {
+        return false;
+    }
+    ServerResourceStart message;
+    message.resource = reader.string(max_resource_name_length);
+    const std::size_t count = reader.u8();
+    if (!reader.ok() || !valid_resource_name(message.resource) || count > max_client_scripts) {
+        return false;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        ScriptFile file;
+        file.name = reader.string(max_script_name_length);
+        file.source = reader.blob(max_script_bytes);
+        // The name ends up in log lines; keep control characters out of it.
+        const bool printable = std::all_of(file.name.begin(), file.name.end(),
+                                           [](char c) { return c >= 0x20 && c < 0x7F; });
+        if (!reader.ok() || file.name.empty() || !printable) {
+            return false;
+        }
+        message.scripts.push_back(std::move(file));
+    }
+    if (!reader.finished()) {
+        return false;
+    }
+    out = std::move(message);
+    return true;
+}
+
+void encode(ByteWriter& out, const ServerResourceStop& message) {
+    write_type(out, MessageType::ServerResourceStop);
+    out.string(message.resource);
+}
+
+bool decode(std::span<const std::uint8_t> packet, ServerResourceStop& out) {
+    ByteReader reader(packet);
+    if (!begin(reader, MessageType::ServerResourceStop)) {
+        return false;
+    }
+    std::string resource = reader.string(max_resource_name_length);
+    if (!reader.finished() || !valid_resource_name(resource)) {
+        return false;
+    }
+    out.resource = std::move(resource);
+    return true;
+}
+
+void encode(ByteWriter& out, const NetEvent& message) {
+    write_type(out, MessageType::NetEvent);
+    out.string(message.name);
+    out.blob(std::span<const std::uint8_t>(message.arguments));
+}
+
+bool decode(std::span<const std::uint8_t> packet, NetEvent& out) {
+    ByteReader reader(packet);
+    if (!begin(reader, MessageType::NetEvent)) {
+        return false;
+    }
+    NetEvent message;
+    message.name = reader.string(max_event_name_length);
+    const std::string arguments = reader.blob(max_event_bytes);
+    if (!reader.finished() || !valid_event_name(message.name)) {
+        return false;
+    }
+    message.arguments.assign(arguments.begin(), arguments.end());
     out = std::move(message);
     return true;
 }

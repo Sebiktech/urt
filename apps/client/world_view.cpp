@@ -1,5 +1,6 @@
 #include "world_view.hpp"
 
+#include "urt/net/components.hpp"
 #include "urt/render/shapes.hpp"
 
 void WorldView::update(double frame_seconds, float tick_fraction, const urt::net::Client& client,
@@ -24,8 +25,12 @@ void WorldView::update(double frame_seconds, float tick_fraction, const urt::net
         if (is_me) {
             client.predicted_pose(tick_fraction, pose); // keeps the history pose if not ready
         }
-        urt::render::add_character(boxes_, pose.position, pose.yaw,
-                                   is_me ? urt::render::local_player_color : urt::render::other_entity_color);
+        // A script may have chosen a colour for this entity.
+        const urt::net::Tint* tint = world.registry.try_get<urt::net::Tint>(entity);
+        const glm::vec3 color = tint != nullptr ? tint->color
+                                : is_me         ? urt::render::local_player_color
+                                                : urt::render::other_entity_color;
+        urt::render::add_character(boxes_, pose.position, pose.yaw, color);
         if (is_me) {
             // The camera sits above and behind the player. "Behind" is +Z,
             // so up on the screen is -Z: that is where W walks.

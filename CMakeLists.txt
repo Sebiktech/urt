@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(URT
-    VERSION 0.5.0
+    VERSION 0.6.0
     DESCRIPTION "Universal Roleplay Tool - engine, game and editor"
     LANGUAGES CXX)
 

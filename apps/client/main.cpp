@@ -10,6 +10,7 @@
 #include "urt/ecs/components.hpp"
 #include "urt/net/client.hpp"
 #include "urt/net/components.hpp"
+#include "urt/script/client_script_system.hpp"
 
 #if defined(URT_CLIENT_WINDOW)
 #include "game_window.hpp"
@@ -256,6 +257,8 @@ int run_client(const urt::Args& args) {
 
     urt::Application app(config);
     auto& client = app.add_system<urt::net::Client>(net_config);
+    // Runs the scripts the server sends, with or without a window.
+    app.add_system<urt::script::ClientScriptSystem>(client);
 
     if (!client.connect()) {
         return 1;

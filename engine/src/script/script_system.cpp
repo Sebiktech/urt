@@ -1,6 +1,7 @@
 #include "urt/script/script_system.hpp"
 
-#include "vm.hpp"
+#include "host.hpp"
+#include "value_codec.hpp"
 
 #include "urt/core/log.hpp"
 #include "urt/ecs/components.hpp"
@@ -9,14 +10,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdint>
-#include <exception>
 #include <fstream>
-#include <functional>
 #include <system_error>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
 
 #include <lua.h>
 #include <lualib.h>
@@ -25,64 +20,19 @@ namespace urt::script {
 namespace {
 
 constexpr const char* manifest_file = "resource.lua";
-constexpr std::size_t max_script_bytes = 1024 * 1024;
-constexpr std::size_t max_scripts_per_resource = 256;
-constexpr std::size_t max_handlers_per_resource = 1024;
-constexpr std::size_t max_timers_per_resource = 1024;
-constexpr std::size_t max_log_message_bytes = 4000;
+constexpr std::size_t max_server_scripts = 256;
 constexpr double max_coordinate = 1.0e6; // metres from the origin
 constexpr double max_speed = 1000.0;     // metres per second
-constexpr double max_timer_seconds = 1.0e9;
 constexpr std::size_t manifest_memory_bytes = 4u * 1024u * 1024u;
-
-// Events the engine sends to scripts.
-constexpr const char* known_events[] = {"playerJoined", "playerLeft", "tick", "stop"};
-
-class Host;
-
-struct Timer {
-    int id = 0;
-    int handler = 0;       // registry reference to the function
-    double due = 0.0;      // server time at which it fires next
-    double interval = 0.0; // 0 = fires once
-};
-
-struct Resource {
-    Host* host = nullptr;
-    std::string name;
-    std::filesystem::path directory;
-    ResourceState state = ResourceState::Failed;
-    std::string error;
-
-    std::unique_ptr<Vm> vm;
-    std::unordered_map<std::string, std::vector<int>> handlers; // event name -> function references
-    std::size_t handler_count = 0;
-    std::vector<Timer> timers;
-    int next_timer_id = 1;
-    std::unordered_set<net::NetId> entities; // spawned by this resource, removed with it
-
-    // Files whose change triggers a reload, with the time we last saw.
-    std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> watched;
-    Clock::time_point last_slow_warning{};
-};
 
 struct Manifest {
     std::vector<std::string> server_scripts;
+    std::vector<std::string> client_scripts;
 };
-
-// Resource names become part of log lines and, later, of network messages.
-bool valid_resource_name(std::string_view name) {
-    if (name.empty() || name.size() > 64) {
-        return false;
-    }
-    return std::all_of(name.begin(), name.end(), [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-    });
-}
 
 // A script path from a manifest must stay inside the resource's folder.
 bool valid_script_path(std::string_view path) {
-    if (path.empty() || path.size() > 200 || path.front() == '/' || path.find("..") != std::string_view::npos) {
+    if (path.empty() || path.size() > 150 || path.front() == '/' || path.find("..") != std::string_view::npos) {
         return false;
     }
     const bool safe_characters = std::all_of(path.begin(), path.end(), [](char c) {
@@ -99,7 +49,7 @@ bool read_file(const std::filesystem::path& path, std::string& out, std::string&
         return false;
     }
     out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    if (out.size() > max_script_bytes) {
+    if (out.size() > net::max_script_bytes) {
         error = path.filename().string() + " is larger than 1 MB";
         return false;
     }
@@ -109,47 +59,6 @@ bool read_file(const std::filesystem::path& path, std::string& out, std::string&
 std::filesystem::file_time_type modified_time(const std::filesystem::path& path) {
     std::error_code ignored;
     return std::filesystem::last_write_time(path, ignored); // the minimum time if the file is gone
-}
-
-// --- helpers for functions called from Lua -------------------------------------
-
-Resource& resource_of(lua_State* L) {
-    return *static_cast<Resource*>(lua_touserdata(L, lua_upvalueindex(1)));
-}
-
-// Reads a number argument and rejects NaN, infinity and absurd sizes. One bad
-// number in a position would be sent to every client nearby.
-double check_number(lua_State* L, int index, double limit, const char* what) {
-    const double value = luaL_checknumber(L, index);
-    if (!std::isfinite(value) || std::abs(value) > limit) {
-        luaL_error(L, "%s must be a number between %g and %g", what, -limit, limit);
-    }
-    return value;
-}
-
-net::NetId check_entity_id(lua_State* L, int index) {
-    const double value = luaL_checknumber(L, index);
-    if (!(value >= 1.0 && value <= 4294967295.0) || value != std::floor(value)) {
-        luaL_error(L, "entity id must be a positive whole number");
-    }
-    return static_cast<net::NetId>(value);
-}
-
-// Reads an optional numeric field such as { x = 3 }. Missing means 0.
-double optional_field(lua_State* L, int table, const char* field, double limit) {
-    lua_getfield(L, table, field);
-    double value = 0.0;
-    if (!lua_isnil(L, -1)) {
-        if (!lua_isnumber(L, -1)) {
-            luaL_error(L, "field '%s' must be a number", field);
-        }
-        value = lua_tonumber(L, -1);
-        if (!std::isfinite(value) || std::abs(value) > limit) {
-            luaL_error(L, "field '%s' must be between %g and %g", field, -limit, limit);
-        }
-    }
-    lua_pop(L, 1);
-    return value;
 }
 
 void push_player(lua_State* L, net::NetId id, const std::string& name, const glm::vec3& position) {
@@ -166,140 +75,65 @@ void push_player(lua_State* L, net::NetId id, const std::string& name, const glm
     lua_setfield(L, -2, "z");
 }
 
-// --- the host: everything behind ScriptSystem ------------------------------------
+// --- the server's script host -----------------------------------------------------
 
-class Host {
+class ServerHost : public HostBase {
 public:
-    Host(net::Server& server, ScriptConfig config) : server_(server), config_(std::move(config)) {
-        config_.memory_limit_bytes = std::max<std::size_t>(config_.memory_limit_bytes, 1024 * 1024);
-    }
+    ServerHost(net::Server& server, ScriptConfig config)
+        : HostBase(HostLimits{config.max_call_seconds, config.slow_call_seconds, config.memory_limit_bytes}),
+          server_(server),
+          config_(std::move(config)) {}
 
     void tick(World& world, const TickContext& context);
     bool load(World& world, const std::filesystem::path& directory);
     bool stop(World& world, std::string_view name);
     std::vector<ResourceInfo> resources() const;
 
+    const char* side() const override { return "server"; }
+    bool known_event(std::string_view event) const override {
+        return event == "playerJoined" || event == "playerLeft" || event == "tick" || event == "stop";
+    }
+
     // Used by the functions scripts call. Only valid while a script runs.
     net::Server& server() { return server_; }
     World& world() { return *world_; }
-    double time() const { return time_; }
     const ScriptConfig& config() const { return config_; }
+
+protected:
+    void register_side_api(Resource& resource, lua_State* L) override;
+    void release_world(Resource& resource) override;
+    void on_failed(Resource& resource) override { tell_clients_to_stop(resource); }
 
 private:
     Resource* find(std::string_view name);
     bool load_directory(const std::filesystem::path& directory);
     bool start(Resource& resource);
     bool read_manifest(Resource& resource, Manifest& manifest);
-    void register_api(Resource& resource);
-    void fail(Resource& resource, std::string error);
-    void shut_down(Resource& resource);
     void restart(Resource& resource);
-
-    bool invoke(Resource& resource, int handler, std::string_view what,
-                const std::function<int(lua_State*)>& push_arguments);
-    void dispatch(Resource& resource, const char* event, const std::function<int(lua_State*)>& push_arguments = {});
-    void run_timers(Resource& resource);
+    void end(Resource& resource);
     void check_files();
+
+    void send_client_scripts(const Resource& resource, net::NetId player);
+    void tell_clients_to_start(Resource& resource);
+    void tell_clients_to_stop(Resource& resource);
 
     net::Server& server_;
     ScriptConfig config_;
     // unique_ptr: scripts hold pointers to their Resource, so it must not move.
     std::vector<std::unique_ptr<Resource>> resources_;
     World* world_ = nullptr;
-    double time_ = 0.0;
     bool started_ = false;
     Clock::time_point last_file_check_{};
 };
 
-// --- the urt.* functions -----------------------------------------------------------
+ServerHost& host_of(lua_State* L) { return static_cast<ServerHost&>(*resource_of(L).host); }
 
-// urt.log(...) and print(...): one log line, values separated by spaces.
-int api_log(lua_State* L) {
-    const Resource& resource = resource_of(L);
-    std::string text;
-    const int count = lua_gettop(L);
-    for (int i = 1; i <= count && text.size() < max_log_message_bytes; ++i) {
-        std::size_t length = 0;
-        const char* part = luaL_tolstring(L, i, &length); // works for any value
-        if (i > 1) {
-            text += ' ';
-        }
-        text.append(part, length);
-        lua_pop(L, 1);
-    }
-    if (text.size() > max_log_message_bytes) {
-        text.resize(max_log_message_bytes);
-    }
-    log::info("script", "[{}] {}", resource.name, text);
-    return 0;
-}
-
-// urt.on(event, handler)
-int api_on(lua_State* L) {
-    Resource& resource = resource_of(L);
-    const char* event = luaL_checkstring(L, 1);
-    luaL_checktype(L, 2, LUA_TFUNCTION);
-
-    const bool known = std::any_of(std::begin(known_events), std::end(known_events),
-                                   [&](const char* name) { return std::string_view(name) == event; });
-    if (!known) {
-        luaL_error(L, "unknown event '%s' (events are playerJoined, playerLeft, tick, stop)", event);
-    }
-    if (resource.handler_count >= max_handlers_per_resource) {
-        luaL_error(L, "too many event handlers");
-    }
-    // A reference keeps the function alive and lets us find it again later.
-    resource.handlers[event].push_back(lua_ref(L, 2));
-    ++resource.handler_count;
-    return 0;
-}
-
-int add_timer(lua_State* L, bool repeating) {
-    Resource& resource = resource_of(L);
-    const double seconds = check_number(L, 1, max_timer_seconds, "seconds");
-    luaL_checktype(L, 2, LUA_TFUNCTION);
-    if (seconds < 0.0) {
-        luaL_error(L, "seconds must not be negative");
-    }
-    if (resource.timers.size() >= max_timers_per_resource) {
-        luaL_error(L, "too many timers");
-    }
-    Timer timer;
-    timer.id = resource.next_timer_id++;
-    timer.handler = lua_ref(L, 2);
-    timer.due = resource.host->time() + seconds;
-    timer.interval = repeating ? std::max(seconds, 1.0e-3) : 0.0;
-    resource.timers.push_back(timer);
-    lua_pushnumber(L, timer.id);
-    return 1;
-}
-
-// urt.after(seconds, fn) -> timer id
-int api_after(lua_State* L) { return add_timer(L, false); }
-
-// urt.every(seconds, fn) -> timer id
-int api_every(lua_State* L) { return add_timer(L, true); }
-
-// urt.clearTimer(id) -> true if there was such a timer
-int api_clear_timer(lua_State* L) {
-    Resource& resource = resource_of(L);
-    const double id = luaL_checknumber(L, 1);
-    const auto found = std::find_if(resource.timers.begin(), resource.timers.end(),
-                                    [&](const Timer& timer) { return timer.id == id; });
-    if (found == resource.timers.end()) {
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-    lua_unref(L, found->handler);
-    resource.timers.erase(found);
-    lua_pushboolean(L, 1);
-    return 1;
-}
+// --- the server's urt.* functions -------------------------------------------------
 
 // urt.spawn({ x, y, z, yaw }) -> entity id. Every field is optional.
 int api_spawn(lua_State* L) {
     Resource& resource = resource_of(L);
-    Host& host = *resource.host;
+    ServerHost& host = host_of(L);
 
     Transform transform;
     if (!lua_isnoneornil(L, 1)) {
@@ -329,25 +163,26 @@ int api_spawn(lua_State* L) {
 // urt.despawn(id) -> true if the entity existed
 int api_despawn(lua_State* L) {
     Resource& resource = resource_of(L);
+    ServerHost& host = host_of(L);
     const net::NetId id = check_entity_id(L, 1);
     if (!resource.entities.contains(id)) {
         luaL_error(L, "entity %d was not spawned by this resource", static_cast<int>(id));
     }
     resource.entities.erase(id);
-    lua_pushboolean(L, resource.host->server().despawn(resource.host->world(), id) ? 1 : 0);
+    lua_pushboolean(L, host.server().despawn(host.world(), id) ? 1 : 0);
     return 1;
 }
 
 // urt.exists(id) -> boolean
 int api_exists(lua_State* L) {
-    Host& host = *resource_of(L).host;
+    ServerHost& host = host_of(L);
     lua_pushboolean(L, host.server().find(host.world(), check_entity_id(L, 1)) != entt::null ? 1 : 0);
     return 1;
 }
 
 // Finds the entity for the id in argument 1, or raises a script error.
 Entity check_entity(lua_State* L) {
-    Host& host = *resource_of(L).host;
+    ServerHost& host = host_of(L);
     const net::NetId id = check_entity_id(L, 1);
     const Entity entity = host.server().find(host.world(), id);
     if (entity == entt::null) {
@@ -359,7 +194,7 @@ Entity check_entity(lua_State* L) {
 // urt.getPosition(id) -> x, y, z
 int api_get_position(lua_State* L) {
     const Entity entity = check_entity(L);
-    const Transform& transform = resource_of(L).host->world().registry.get<Transform>(entity);
+    const Transform& transform = host_of(L).world().registry.get<Transform>(entity);
     lua_pushnumber(L, transform.position.x);
     lua_pushnumber(L, transform.position.y);
     lua_pushnumber(L, transform.position.z);
@@ -372,14 +207,14 @@ int api_set_position(lua_State* L) {
     const glm::vec3 position{static_cast<float>(check_number(L, 2, max_coordinate, "x")),
                              static_cast<float>(check_number(L, 3, max_coordinate, "y")),
                              static_cast<float>(check_number(L, 4, max_coordinate, "z"))};
-    resource_of(L).host->world().registry.get<Transform>(entity).position = position;
+    host_of(L).world().registry.get<Transform>(entity).position = position;
     return 0;
 }
 
 // urt.getYaw(id) -> radians
 int api_get_yaw(lua_State* L) {
     const Entity entity = check_entity(L);
-    lua_pushnumber(L, resource_of(L).host->world().registry.get<Transform>(entity).yaw);
+    lua_pushnumber(L, host_of(L).world().registry.get<Transform>(entity).yaw);
     return 1;
 }
 
@@ -387,7 +222,7 @@ int api_get_yaw(lua_State* L) {
 int api_set_yaw(lua_State* L) {
     const Entity entity = check_entity(L);
     const double yaw = check_number(L, 2, max_coordinate, "yaw");
-    resource_of(L).host->world().registry.get<Transform>(entity).yaw = static_cast<float>(yaw);
+    host_of(L).world().registry.get<Transform>(entity).yaw = static_cast<float>(yaw);
     return 0;
 }
 
@@ -399,13 +234,13 @@ int api_set_velocity(lua_State* L) {
     const glm::vec3 velocity{static_cast<float>(check_number(L, 2, max_speed, "vx")),
                              static_cast<float>(check_number(L, 3, max_speed, "vy")),
                              static_cast<float>(check_number(L, 4, max_speed, "vz"))};
-    resource_of(L).host->world().registry.get_or_emplace<Velocity>(entity).linear = velocity;
+    host_of(L).world().registry.get_or_emplace<Velocity>(entity).linear = velocity;
     return 0;
 }
 
 // urt.players() -> array of { id, name, x, y, z }
 int api_players(lua_State* L) {
-    Host& host = *resource_of(L).host;
+    ServerHost& host = host_of(L);
     const std::vector<net::PlayerInfo> players = host.server().players();
     lua_createtable(L, static_cast<int>(players.size()), 0);
     int index = 1;
@@ -416,57 +251,67 @@ int api_players(lua_State* L) {
     return 1;
 }
 
-// urt.time() -> seconds the server has been simulating
-int api_time(lua_State* L) {
-    lua_pushnumber(L, resource_of(L).host->time());
+// Builds the message for urt.emitClient / urt.emitAllClients from the event
+// name at `name_index` and every argument after it.
+void encode_event(lua_State* L, int name_index, net::ByteWriter& writer) {
+    std::size_t length = 0;
+    const char* name = luaL_checklstring(L, name_index, &length);
+    net::NetEvent event;
+    event.name.assign(name, length);
+    if (!net::valid_event_name(event.name)) {
+        luaL_error(L, "an event name is 1 to 64 characters without spaces");
+    }
+    encode_values(L, name_index + 1, lua_gettop(L), event.arguments);
+    encode(writer, event);
+}
+
+// urt.emitClient(playerId, event, ...) -> false if that player is not connected
+int api_emit_client(lua_State* L) {
+    const net::NetId player = check_entity_id(L, 1);
+    net::ByteWriter writer;
+    encode_event(L, 2, writer);
+    lua_pushboolean(L, host_of(L).server().send_reliable(player, writer.bytes()) ? 1 : 0);
     return 1;
 }
 
-// --- Host implementation -------------------------------------------------------------
+// urt.emitAllClients(event, ...)
+int api_emit_all_clients(lua_State* L) {
+    net::ByteWriter writer;
+    encode_event(L, 1, writer);
+    host_of(L).server().broadcast_reliable(writer.bytes());
+    return 0;
+}
 
-void Host::register_api(Resource& resource) {
-    lua_State* L = resource.vm->state();
+// --- ServerHost implementation ------------------------------------------------------
 
-    // Every function carries a pointer to its resource as an "upvalue", so
-    // it knows who is calling without any global lookup.
-    const auto add = [&](const char* name, lua_CFunction function) {
-        lua_pushlightuserdata(L, &resource);
-        lua_pushcclosure(L, function, name, 1);
-        lua_setfield(L, -2, name);
-    };
+void ServerHost::register_side_api(Resource& resource, lua_State* L) {
+    add_function(L, resource, "spawn", api_spawn);
+    add_function(L, resource, "despawn", api_despawn);
+    add_function(L, resource, "exists", api_exists);
+    add_function(L, resource, "getPosition", api_get_position);
+    add_function(L, resource, "setPosition", api_set_position);
+    add_function(L, resource, "getYaw", api_get_yaw);
+    add_function(L, resource, "setYaw", api_set_yaw);
+    add_function(L, resource, "setVelocity", api_set_velocity);
+    add_function(L, resource, "players", api_players);
+    add_function(L, resource, "emitClient", api_emit_client);
+    add_function(L, resource, "emitAllClients", api_emit_all_clients);
+}
 
-    lua_newtable(L);
-    add("log", api_log);
-    add("on", api_on);
-    add("after", api_after);
-    add("every", api_every);
-    add("clearTimer", api_clear_timer);
-    add("spawn", api_spawn);
-    add("despawn", api_despawn);
-    add("exists", api_exists);
-    add("getPosition", api_get_position);
-    add("setPosition", api_set_position);
-    add("getYaw", api_get_yaw);
-    add("setYaw", api_set_yaw);
-    add("setVelocity", api_set_velocity);
-    add("players", api_players);
-    add("time", api_time);
-    lua_pushlstring(L, resource.name.data(), resource.name.size());
-    lua_setfield(L, -2, "resourceName");
-    lua_setglobal(L, "urt");
-
-    // print() goes to the server log too, instead of a console nobody reads.
-    lua_pushlightuserdata(L, &resource);
-    lua_pushcclosure(L, api_log, "print", 1);
-    lua_setglobal(L, "print");
+void ServerHost::release_world(Resource& resource) {
+    if (world_ != nullptr) {
+        for (const net::NetId id : resource.entities) {
+            server_.despawn(*world_, id);
+        }
+    }
+    resource.entities.clear();
 }
 
 // Runs resource.lua in a throwaway VM that has no game API at all, and reads
 // the table it returns.
-bool Host::read_manifest(Resource& resource, Manifest& manifest) {
-    const std::filesystem::path path = resource.directory / manifest_file;
+bool ServerHost::read_manifest(Resource& resource, Manifest& manifest) {
     std::string source;
-    if (!read_file(path, source, resource.error)) {
+    if (!read_file(resource.directory / manifest_file, source, resource.error)) {
         return false;
     }
 
@@ -481,6 +326,31 @@ bool Host::read_manifest(Resource& resource, Manifest& manifest) {
     }
 
     std::string problem;
+    // Reads a field that must be a list of script paths, such as `server`.
+    const auto read_list = [&](lua_State* L, const char* field, std::size_t limit, std::vector<std::string>& out) {
+        lua_getfield(L, 1, field);
+        if (lua_istable(L, -1)) {
+            const int count = lua_objlen(L, -1);
+            if (count > static_cast<int>(limit)) {
+                problem = std::string("too many scripts in '") + field + "'";
+            }
+            for (int i = 1; i <= count && problem.empty(); ++i) {
+                lua_rawgeti(L, -1, i);
+                const char* script = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
+                if (script == nullptr || !valid_script_path(script)) {
+                    problem = "entry " + std::to_string(i) + " of '" + field +
+                              "' is not a valid script path (a .lua file inside the resource)";
+                } else {
+                    out.emplace_back(script);
+                }
+                lua_pop(L, 1);
+            }
+        } else if (!lua_isnil(L, -1)) {
+            problem = std::string("'") + field + "' must be a list of script files";
+        }
+        lua_pop(L, 1);
+    };
+
     const auto parse = [&](lua_State* L, int count) {
         if (count < 1 || !lua_istable(L, 1)) {
             problem = "resource.lua must return a table";
@@ -491,31 +361,15 @@ bool Host::read_manifest(Resource& resource, Manifest& manifest) {
             problem = "the name in resource.lua must be the folder's name, '" + resource.name + "'";
         }
         lua_pop(L, 1);
-
-        lua_getfield(L, 1, "server");
-        if (lua_istable(L, -1)) {
-            const int scripts = lua_objlen(L, -1);
-            if (scripts > static_cast<int>(max_scripts_per_resource)) {
-                problem = "too many server scripts";
-            }
-            for (int i = 1; i <= scripts && problem.empty(); ++i) {
-                lua_rawgeti(L, -1, i);
-                const char* script = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
-                if (script == nullptr || !valid_script_path(script)) {
-                    problem = "entry " + std::to_string(i) +
-                              " of 'server' is not a valid script path (a .lua file inside the resource)";
-                } else {
-                    manifest.server_scripts.emplace_back(script);
-                }
-                lua_pop(L, 1);
-            }
-        } else if (!lua_isnil(L, -1)) {
-            problem = "'server' must be a list of script files";
+        if (problem.empty()) {
+            read_list(L, "server", max_server_scripts, manifest.server_scripts);
         }
-        lua_pop(L, 1);
+        if (problem.empty()) {
+            read_list(L, "client", net::max_client_scripts, manifest.client_scripts);
+        }
     };
 
-    const CallResult result = vm.call(0, config_.max_call_seconds, resource.error, parse);
+    const CallResult result = vm.call(0, limits_.max_call_seconds, resource.error, parse);
     if (result != CallResult::Ok) {
         return false;
     }
@@ -526,176 +380,107 @@ bool Host::read_manifest(Resource& resource, Manifest& manifest) {
     return true;
 }
 
-bool Host::start(Resource& resource) {
+bool ServerHost::start(Resource& resource) {
     resource.error.clear();
+    resource.client_scripts.clear();
     resource.watched.clear();
     const std::filesystem::path manifest_path = resource.directory / manifest_file;
     resource.watched.emplace_back(manifest_path, modified_time(manifest_path));
 
+    Manifest manifest;
     try {
-        Manifest manifest;
         if (!read_manifest(resource, manifest)) {
             fail(resource, resource.error);
             return false;
         }
-        // Watch every script before running any, so that fixing a broken
-        // file triggers a reload.
-        for (const std::string& script : manifest.server_scripts) {
-            const std::filesystem::path path = resource.directory / script;
-            resource.watched.emplace_back(path, modified_time(path));
-        }
-
-        resource.vm = std::make_unique<Vm>(config_.memory_limit_bytes);
-        if (resource.vm->state() == nullptr) {
-            fail(resource, "cannot create a script VM");
-            return false;
-        }
-        register_api(resource);
-        resource.vm->seal();
-
-        for (const std::string& script : manifest.server_scripts) {
-            std::string source;
-            std::string error;
-            if (!read_file(resource.directory / script, source, error) ||
-                !resource.vm->load(resource.name + "/" + script, source, error)) {
-                fail(resource, error);
-                return false;
-            }
-            // Loading may do one-off setup work, so it gets more time than
-            // a handler that runs every tick.
-            const CallResult result = resource.vm->call(0, config_.max_call_seconds * 4.0, error);
-            if (result != CallResult::Ok) {
-                fail(resource, error);
-                return false;
-            }
-        }
     } catch (const std::exception& e) {
-        // Luau reports running out of memory outside a script as an exception.
         fail(resource, e.what());
         return false;
     }
 
-    resource.state = ResourceState::Running;
-    log::info("script", "started resource '{}'", resource.name);
+    // Watch every script before running any, so that fixing a broken file
+    // triggers a reload.
+    for (const std::vector<std::string>* list : {&manifest.server_scripts, &manifest.client_scripts}) {
+        for (const std::string& script : *list) {
+            const std::filesystem::path path = resource.directory / script;
+            resource.watched.emplace_back(path, modified_time(path));
+        }
+    }
+
+    // Read everything first: a resource with a missing file should not run
+    // half of its scripts.
+    std::vector<net::ScriptFile> server_scripts;
+    for (const std::vector<std::string>* list : {&manifest.server_scripts, &manifest.client_scripts}) {
+        const bool for_client = list == &manifest.client_scripts;
+        for (const std::string& script : *list) {
+            net::ScriptFile file;
+            file.name = resource.name + "/" + script;
+            std::string error;
+            if (!read_file(resource.directory / script, file.source, error)) {
+                resource.client_scripts.clear();
+                fail(resource, error);
+                return false;
+            }
+            (for_client ? resource.client_scripts : server_scripts).push_back(std::move(file));
+        }
+    }
+
+    if (!run_scripts(resource, server_scripts)) {
+        return false;
+    }
+    tell_clients_to_start(resource);
     return true;
 }
 
-void Host::fail(Resource& resource, std::string error) {
-    log::error("script", "[{}] stopped: {}", resource.name, error);
-    shut_down(resource);
-    resource.state = ResourceState::Failed;
-    resource.error = std::move(error);
-}
-
-// Removes everything a resource put into the world and frees its VM.
-void Host::shut_down(Resource& resource) {
-    if (world_ != nullptr) {
-        for (const net::NetId id : resource.entities) {
-            server_.despawn(*world_, id);
-        }
-    }
-    resource.entities.clear();
-    resource.handlers.clear();
-    resource.handler_count = 0;
-    resource.timers.clear();
-    resource.vm.reset(); // closing the VM releases every function reference
-    resource.state = ResourceState::Failed;
-}
-
-void Host::restart(Resource& resource) {
+// Stops a running resource in an orderly way: its "stop" handlers run, the
+// clients are told, and what it spawned is removed.
+void ServerHost::end(Resource& resource) {
     if (resource.state == ResourceState::Running) {
         dispatch(resource, "stop");
     }
+    tell_clients_to_stop(resource);
     shut_down(resource);
+}
+
+void ServerHost::restart(Resource& resource) {
+    end(resource);
     start(resource);
 }
 
-// Calls one script function. Returns false if the resource is no longer
-// running afterwards.
-bool Host::invoke(Resource& resource, int handler, std::string_view what,
-                  const std::function<int(lua_State*)>& push_arguments) {
-    std::string error;
-    CallResult result = CallResult::Killed;
-    try {
-        lua_State* L = resource.vm->state();
-        lua_getref(L, handler);
-        const int arguments = push_arguments ? push_arguments(L) : 0;
-        result = resource.vm->call(arguments, config_.max_call_seconds, error);
-    } catch (const std::exception& e) {
-        error = e.what(); // out of memory while preparing the call
-    }
-
-    if (result == CallResult::Killed) {
-        fail(resource, std::string(what) + " " + error);
-        return false;
-    }
-    if (result == CallResult::Error) {
-        // An ordinary script error: report it and carry on, as a web page
-        // carries on after one failed click handler.
-        log::error("script", "[{}] error in {}: {}", resource.name, what, error);
-    }
-
-    const double seconds = resource.vm->last_call_seconds();
-    if (seconds > config_.slow_call_seconds && Clock::now() - resource.last_slow_warning > std::chrono::seconds(5)) {
-        resource.last_slow_warning = Clock::now();
-        log::warn("script", "[{}] {} took {:.1f} ms", resource.name, what, seconds * 1000.0);
-    }
-    return true;
+// Sends one player the client scripts of a resource.
+void ServerHost::send_client_scripts(const Resource& resource, net::NetId player) {
+    net::ServerResourceStart message;
+    message.resource = resource.name;
+    message.scripts = resource.client_scripts;
+    net::ByteWriter writer;
+    encode(writer, message);
+    server_.send_reliable(player, writer.bytes());
 }
 
-void Host::dispatch(Resource& resource, const char* event, const std::function<int(lua_State*)>& push_arguments) {
-    if (resource.state != ResourceState::Running) {
+void ServerHost::tell_clients_to_start(Resource& resource) {
+    if (resource.client_scripts.empty()) {
         return;
     }
-    const auto found = resource.handlers.find(event);
-    if (found == resource.handlers.end()) {
-        return;
-    }
-    // A copy: a handler may register more handlers while we go through them.
-    const std::vector<int> handlers = found->second;
-    const std::string what = std::string("the '") + event + "' handler";
-    for (const int handler : handlers) {
-        if (!invoke(resource, handler, what, push_arguments)) {
-            return;
-        }
-    }
+    net::ServerResourceStart message;
+    message.resource = resource.name;
+    message.scripts = resource.client_scripts;
+    net::ByteWriter writer;
+    encode(writer, message);
+    server_.broadcast_reliable(writer.bytes());
+    resource.clients_have_it = true;
 }
 
-void Host::run_timers(Resource& resource) {
-    if (resource.state != ResourceState::Running || resource.timers.empty()) {
+void ServerHost::tell_clients_to_stop(Resource& resource) {
+    if (!resource.clients_have_it) {
         return;
     }
-    // Collect ids first: a timer's function may add or clear timers.
-    std::vector<int> due;
-    for (const Timer& timer : resource.timers) {
-        if (timer.due <= time_) {
-            due.push_back(timer.id);
-        }
-    }
-    for (const int id : due) {
-        const auto by_id = [id](const Timer& timer) { return timer.id == id; };
-        auto timer = std::find_if(resource.timers.begin(), resource.timers.end(), by_id);
-        if (timer == resource.timers.end()) {
-            continue; // cleared by an earlier timer this tick
-        }
-        const int handler = timer->handler;
-        if (!invoke(resource, handler, "a timer", {})) {
-            return;
-        }
-        timer = std::find_if(resource.timers.begin(), resource.timers.end(), by_id);
-        if (timer == resource.timers.end()) {
-            continue; // it cleared itself
-        }
-        if (timer->interval > 0.0) {
-            timer->due = time_ + timer->interval;
-        } else {
-            lua_unref(resource.vm->state(), timer->handler);
-            resource.timers.erase(timer);
-        }
-    }
+    net::ByteWriter writer;
+    encode(writer, net::ServerResourceStop{resource.name});
+    server_.broadcast_reliable(writer.bytes());
+    resource.clients_have_it = false;
 }
 
-Resource* Host::find(std::string_view name) {
+Resource* ServerHost::find(std::string_view name) {
     for (const std::unique_ptr<Resource>& resource : resources_) {
         if (resource->name == name) {
             return resource.get();
@@ -704,9 +489,9 @@ Resource* Host::find(std::string_view name) {
     return nullptr;
 }
 
-bool Host::load_directory(const std::filesystem::path& directory) {
+bool ServerHost::load_directory(const std::filesystem::path& directory) {
     const std::string name = directory.filename().string();
-    if (!valid_resource_name(name)) {
+    if (!net::valid_resource_name(name)) {
         log::warn("script", "skipping '{}': resource folder names may only use a-z, 0-9, '_' and '-'", name);
         return false;
     }
@@ -725,41 +510,37 @@ bool Host::load_directory(const std::filesystem::path& directory) {
     return start(*resource);
 }
 
-bool Host::load(World& world, const std::filesystem::path& directory) {
+bool ServerHost::load(World& world, const std::filesystem::path& directory) {
     world_ = &world;
     const bool running = load_directory(directory);
     world_ = nullptr;
     return running;
 }
 
-bool Host::stop(World& world, std::string_view name) {
+bool ServerHost::stop(World& world, std::string_view name) {
     Resource* resource = find(name);
     if (resource == nullptr) {
         return false;
     }
     world_ = &world;
     if (resource->state == ResourceState::Running) {
-        dispatch(*resource, "stop");
-        log::info("script", "stopped resource '{}'", resource->name);
+        log::info("script", "stopping resource '{}'", resource->name);
     }
-    shut_down(*resource);
+    end(*resource);
     world_ = nullptr;
     std::erase_if(resources_, [&](const std::unique_ptr<Resource>& r) { return r.get() == resource; });
     return true;
 }
 
 // Looks for resource folders that appeared or vanished and files that changed.
-void Host::check_files() {
+void ServerHost::check_files() {
     std::error_code ignored;
 
     for (std::size_t i = 0; i < resources_.size();) {
         Resource& resource = *resources_[i];
         if (!std::filesystem::is_directory(resource.directory, ignored)) {
             log::info("script", "resource '{}' was removed from disk", resource.name);
-            if (resource.state == ResourceState::Running) {
-                dispatch(resource, "stop");
-            }
-            shut_down(resource);
+            end(resource);
             resources_.erase(resources_.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
         }
@@ -779,7 +560,7 @@ void Host::check_files() {
     for (const auto& entry : std::filesystem::directory_iterator(config_.resources_directory, ignored)) {
         if (entry.is_directory(ignored) && std::filesystem::exists(entry.path() / manifest_file, ignored) &&
             find(entry.path().filename().string()) == nullptr &&
-            valid_resource_name(entry.path().filename().string())) {
+            net::valid_resource_name(entry.path().filename().string())) {
             fresh.push_back(entry.path());
         }
     }
@@ -789,7 +570,7 @@ void Host::check_files() {
     }
 }
 
-void Host::tick(World& world, const TickContext& context) {
+void ServerHost::tick(World& world, const TickContext& context) {
     world_ = &world;
     time_ = context.time;
 
@@ -807,14 +588,51 @@ void Host::tick(World& world, const TickContext& context) {
     // None of the calls below adds or removes resources: a failing one stays
     // in the list, marked as failed.
     for (const net::PlayerEvent& event : server_.player_events()) {
-        const char* name = event.kind == net::PlayerEvent::Kind::Joined ? "playerJoined" : "playerLeft";
+        const bool joined = event.kind == net::PlayerEvent::Kind::Joined;
+        if (joined) {
+            // Scripts first: anything a playerJoined handler sends to this
+            // client then arrives after the scripts that will receive it.
+            for (const std::unique_ptr<Resource>& resource : resources_) {
+                if (resource->clients_have_it) {
+                    send_client_scripts(*resource, event.id);
+                }
+            }
+        }
         for (const std::unique_ptr<Resource>& resource : resources_) {
-            dispatch(*resource, name, [&](lua_State* L) {
+            dispatch(*resource, joined ? "playerJoined" : "playerLeft", [&](lua_State* L) {
                 push_player(L, event.id, event.name, event.position);
                 return 1;
             });
         }
     }
+
+    // Events from client scripts. Whatever they carry was chosen by the
+    // client; handlers must check it like any other outside input.
+    for (const net::ReceivedEvent& received : server_.received_events()) {
+        const Entity entity = server_.player_entity(received.player);
+        if (entity == entt::null) {
+            continue; // the player left in the same tick
+        }
+        std::string player_name;
+        for (const net::PlayerInfo& player : server_.players()) {
+            if (player.id == received.player) {
+                player_name = player.name;
+            }
+        }
+        const glm::vec3 position = world.registry.get<Transform>(entity).position;
+        for (const std::unique_ptr<Resource>& resource : resources_) {
+            dispatch_net(*resource, received.event.name, [&](lua_State* L) {
+                push_player(L, received.player, player_name, position);
+                const int count = decode_values(L, received.event.arguments);
+                if (count < 0) {
+                    lua_pop(L, 1); // the player table
+                    return -1;     // malformed arguments: skip the call
+                }
+                return 1 + count;
+            });
+        }
+    }
+
     for (const std::unique_ptr<Resource>& resource : resources_) {
         run_timers(*resource);
         dispatch(*resource, "tick", [&](lua_State* L) {
@@ -831,7 +649,7 @@ void Host::tick(World& world, const TickContext& context) {
     world_ = nullptr;
 }
 
-std::vector<ResourceInfo> Host::resources() const {
+std::vector<ResourceInfo> ServerHost::resources() const {
     std::vector<ResourceInfo> result;
     for (const std::unique_ptr<Resource>& resource : resources_) {
         ResourceInfo info;
@@ -847,8 +665,8 @@ std::vector<ResourceInfo> Host::resources() const {
 
 } // namespace
 
-struct ScriptSystem::Impl : Host {
-    using Host::Host;
+struct ScriptSystem::Impl : ServerHost {
+    using ServerHost::ServerHost;
 };
 
 ScriptSystem::ScriptSystem(net::Server& server, ScriptConfig config)

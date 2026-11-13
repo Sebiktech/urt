@@ -274,19 +274,147 @@ TEST_CASE("encode never writes more than max_snapshot_entities") {
     CHECK(out.entities.size() == max_snapshot_entities);
 }
 
+TEST_CASE("eight-byte numbers and long blobs round-trip") {
+    ByteWriter writer;
+    writer.f64(-1234.5678901234);
+    writer.blob(std::string(70000, 'z'));
+    writer.blob(std::string_view{});
+
+    ByteReader reader(writer.bytes());
+    CHECK(reader.f64() == -1234.5678901234);
+    CHECK(reader.blob(100000).size() == 70000);
+    CHECK(reader.blob(10).empty());
+    CHECK(reader.finished());
+
+    // Too long for the caller's limit.
+    ByteReader limited(writer.bytes());
+    limited.f64();
+    CHECK(limited.blob(1000).empty());
+    CHECK_FALSE(limited.ok());
+
+    // A length that promises four gigabytes must fail without allocating them.
+    ByteWriter lying;
+    lying.u32(0xFFFFFFFF);
+    lying.u8(1);
+    ByteReader huge(lying.bytes());
+    CHECK(huge.blob(0xFFFFFFFF).empty());
+    CHECK_FALSE(huge.ok());
+
+    ByteWriter nan;
+    nan.f64(std::numeric_limits<double>::quiet_NaN());
+    ByteReader bad(nan.bytes());
+    CHECK(bad.f64() == 0.0);
+    CHECK_FALSE(bad.ok());
+}
+
+TEST_CASE("script messages survive encode and decode") {
+    SUBCASE("ServerResourceStart") {
+        ServerResourceStart in;
+        in.resource = "welcome";
+        in.scripts.push_back({"welcome/a.lua", "print('a')"});
+        in.scripts.push_back({"welcome/b.lua", std::string(200000, ' ')});
+        in.scripts.push_back({"welcome/empty.lua", ""});
+        ServerResourceStart out;
+        REQUIRE(decode(encoded(in), out));
+        CHECK(out.resource == "welcome");
+        REQUIRE(out.scripts.size() == 3);
+        CHECK(out.scripts[0].name == "welcome/a.lua");
+        CHECK(out.scripts[0].source == "print('a')");
+        CHECK(out.scripts[1].source.size() == 200000);
+        CHECK(out.scripts[2].source.empty());
+    }
+    SUBCASE("ServerResourceStop") {
+        ServerResourceStop out;
+        REQUIRE(decode(encoded(ServerResourceStop{"my-resource_2"}), out));
+        CHECK(out.resource == "my-resource_2");
+    }
+    SUBCASE("NetEvent") {
+        NetEvent out;
+        REQUIRE(decode(encoded(NetEvent{"chat:say", {1, 2, 3}}), out));
+        CHECK(out.name == "chat:say");
+        CHECK(out.arguments == std::vector<std::uint8_t>{1, 2, 3});
+        REQUIRE(decode(encoded(NetEvent{"x", {}}), out));
+        CHECK(out.arguments.empty());
+    }
+}
+
+TEST_CASE("script messages outside the limits are refused") {
+    ServerResourceStart start_out;
+    ServerResourceStop stop_out;
+    NetEvent event_out;
+
+    // Resource names end up in log lines and file-like names.
+    for (const char* bad : {"", "Bad", "has space", "dots.not.allowed", "new\nline", "../up"}) {
+        CHECK_FALSE(decode(encoded(ServerResourceStop{bad}), stop_out));
+        CHECK_FALSE(decode(encoded(ServerResourceStart{bad, {}}), start_out));
+    }
+    CHECK_FALSE(decode(encoded(ServerResourceStop{std::string(65, 'a')}), stop_out));
+
+    // A script name with a control character, and one that is empty.
+    CHECK_FALSE(decode(encoded(ServerResourceStart{"ok", {{"evil\rname.lua", ""}}}), start_out));
+    CHECK_FALSE(decode(encoded(ServerResourceStart{"ok", {{"", "print(1)"}}}), start_out));
+
+    // A script larger than one megabyte.
+    CHECK_FALSE(decode(encoded(ServerResourceStart{"ok", {{"big.lua", std::string(max_script_bytes + 1, ' ')}}}),
+                       start_out));
+
+    // More scripts than allowed: encode() cuts the list, so build it by hand.
+    ByteWriter many;
+    many.u8(static_cast<std::uint8_t>(MessageType::ServerResourceStart));
+    many.string("ok");
+    many.u8(static_cast<std::uint8_t>(max_client_scripts + 1));
+    for (std::size_t i = 0; i <= max_client_scripts; ++i) {
+        many.string("s.lua");
+        many.blob(std::string_view{});
+    }
+    CHECK_FALSE(decode(many.bytes(), start_out));
+
+    // Event names: no spaces, no control characters, 1 to 64 characters.
+    for (const std::string& bad : {std::string(), std::string("two words"), std::string("tab\there"),
+                                    std::string(65, 'e'), std::string("caf\xC3\xA9")}) {
+        CHECK_FALSE(decode(encoded(NetEvent{bad, {}}), event_out));
+    }
+    CHECK(decode(encoded(NetEvent{std::string(64, 'e'), {}}), event_out));
+
+    // Arguments over 16 KB.
+    CHECK_FALSE(decode(encoded(NetEvent{"big", std::vector<std::uint8_t>(max_event_bytes + 1, 0)}), event_out));
+    CHECK(decode(encoded(NetEvent{"big", std::vector<std::uint8_t>(max_event_bytes, 0)}), event_out));
+
+    // Every shorter prefix of a valid message is refused, and so is padding.
+    ServerResourceStart sample;
+    sample.resource = "sample";
+    sample.scripts.push_back({"sample/client.lua", "urt.log('hi')"});
+    const std::vector<std::uint8_t> start_bytes = encoded(sample);
+    const std::vector<std::uint8_t> event_bytes = encoded(NetEvent{"sample:event", {1, 2, 3, 4}});
+    for (std::size_t length = 0; length < start_bytes.size(); ++length) {
+        const std::vector<std::uint8_t> cut(start_bytes.begin(), start_bytes.begin() + static_cast<std::ptrdiff_t>(length));
+        CHECK_FALSE(decode(cut, start_out));
+    }
+    for (std::size_t length = 0; length < event_bytes.size(); ++length) {
+        const std::vector<std::uint8_t> cut(event_bytes.begin(), event_bytes.begin() + static_cast<std::ptrdiff_t>(length));
+        CHECK_FALSE(decode(cut, event_out));
+    }
+    std::vector<std::uint8_t> padded = event_bytes;
+    padded.push_back(0);
+    CHECK_FALSE(decode(padded, event_out));
+}
+
 TEST_CASE("decoders survive random garbage") {
     // Nothing here checks results: the test passes if nothing crashes or
     // reads out of bounds. The sanitizer builds are what make it meaningful.
     std::mt19937 random(12345);
     std::uniform_int_distribution<int> byte(0, 255);
     std::uniform_int_distribution<int> length(0, 96);
-    std::uniform_int_distribution<int> type(0, 6);
+    std::uniform_int_distribution<int> type(0, 9);
 
     ClientHello hello;
     ServerWelcome welcome;
     ServerReject reject;
     ClientInput input;
     ServerSnapshot snapshot;
+    ServerResourceStart start;
+    ServerResourceStop stop;
+    NetEvent event;
 
     for (int round = 0; round < 20000; ++round) {
         std::vector<std::uint8_t> packet(static_cast<std::size_t>(length(random)));
@@ -302,6 +430,9 @@ TEST_CASE("decoders survive random garbage") {
         (void)decode(packet, reject);
         (void)decode(packet, input);
         (void)decode(packet, snapshot);
+        (void)decode(packet, start);
+        (void)decode(packet, stop);
+        (void)decode(packet, event);
     }
     CHECK(true);
 }

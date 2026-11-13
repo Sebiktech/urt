@@ -145,7 +145,7 @@ TEST_CASE("a resource loads, runs and logs") {
     CHECK(s.info("hello").error.empty());
     CHECK(log.has("script: [hello] hello from hello 42 true nil"));
     CHECK(log.has("script: [hello] print works too"));
-    CHECK(log.has("started resource 'hello'"));
+    CHECK(log.has("started server resource 'hello'"));
 }
 
 TEST_CASE("scripts spawn, move and remove entities") {

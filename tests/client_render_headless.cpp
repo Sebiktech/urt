@@ -14,6 +14,7 @@
 #include "urt/ecs/components.hpp"
 #include "urt/ecs/movement_system.hpp"
 #include "urt/net/client.hpp"
+#include "urt/net/components.hpp"
 #include "urt/net/server.hpp"
 #include "urt/render/renderer.hpp"
 
@@ -135,6 +136,14 @@ int main(int argc, char** argv) {
     urt::log::info("test", "player drawn at x = {:.2f} m", player_x);
     ok = check(player_x > 8.0f && player_x < 14.0f, "the drawn player moved with the server") && ok;
 
+    // A script colouring an entity (urt.setColor) shows up in the picture.
+    // NPC 1 walks ahead of the player and is a few metres to their left by now.
+    const urt::Entity painted = client.find(1);
+    if (check(painted != entt::null, "the client sees NPC 1")) {
+        client_app.world().registry.emplace<urt::net::Tint>(painted, glm::vec3{0.3f, 0.9f, 0.4f});
+        view.update(0.0, 1.0f, client, client_app.world());
+    }
+
     renderer.request_screenshot(output);
     ok = check(renderer.draw_frame(view.camera(), view.boxes()), "draw_frame with screenshot") && ok;
 
@@ -151,6 +160,7 @@ int main(int argc, char** argv) {
         ok = check(counts.orange_y < image.height / 2.0 && counts.orange_y > image.height * 0.35,
                    "the player stands just above the centre") && ok;
         ok = check(counts.blue > 1000, "NPCs are visible") && ok;
+        ok = check(counts.green > 100, "the entity coloured by a script is green") && ok;
         ok = check(counts.grid > 1000, "the grid is visible") && ok;
     } else {
         ok = false;

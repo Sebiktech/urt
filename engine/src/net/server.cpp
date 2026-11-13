@@ -123,7 +123,15 @@ Entity Server::player_entity(NetId player_id) const {
 
 void Server::tick(World& world, const TickContext& context) {
     player_events_.clear();
+    received_events_.clear();
     events_.clear();
+
+    // Refill every player's allowance of script events.
+    for (auto& [peer, session] : sessions_) {
+        session.event_tokens = std::min(config_.event_burst,
+                                        session.event_tokens + config_.event_rate_per_second * context.dt);
+    }
+
     transport_.poll(events_);
 
     for (const Event& event : events_) {
@@ -181,9 +189,18 @@ void Server::handle_packet(World& world, const TickContext& context, PeerId peer
         }
         handle_input(session, data);
         return;
+    case MessageType::NetEvent:
+        if (channel != Channel::Reliable || !session.active) {
+            kick(world, peer, session, "unexpected event");
+            return;
+        }
+        handle_event(world, peer, session, data);
+        return;
     case MessageType::ServerWelcome:
     case MessageType::ServerReject:
     case MessageType::ServerSnapshot:
+    case MessageType::ServerResourceStart:
+    case MessageType::ServerResourceStop:
     case MessageType::Invalid:
         break;
     }
@@ -218,6 +235,7 @@ void Server::handle_hello(World& world, const TickContext& context, PeerId peer,
     registry.emplace<Velocity>(entity);
 
     session.active = true;
+    session.event_tokens = config_.event_burst;
     session.entity = entity;
     session.player_id = id;
     session.name = std::move(hello.name);
@@ -260,6 +278,46 @@ void Server::handle_input(Session& session, std::span<const std::uint8_t> data) 
         // overflow is thrown away, never simulated.
         if (session.queue.size() > config_.max_queued_inputs) {
             session.queue.pop_front();
+        }
+    }
+}
+
+void Server::handle_event(World& world, PeerId peer, Session& session, std::span<const std::uint8_t> data) {
+    NetEvent event;
+    if (!decode(data, event)) {
+        // The reliable channel does not damage packets, so this client is
+        // sending something that is not our protocol.
+        kick(world, peer, session, "malformed event");
+        return;
+    }
+    if (session.event_tokens < 1.0) {
+        // Over the allowance. Dropping is enough for a script that got too
+        // eager; a client that never stops is disconnected.
+        if (session.dropped_events == 0) {
+            log::warn("net", "'{}' sends script events too fast; dropping the excess", session.name);
+        }
+        if (++session.dropped_events > config_.max_dropped_events) {
+            kick(world, peer, session, "event flood");
+        }
+        return;
+    }
+    session.event_tokens -= 1.0;
+    received_events_.push_back(ReceivedEvent{session.player_id, std::move(event)});
+}
+
+bool Server::send_reliable(NetId player, std::span<const std::uint8_t> message) {
+    for (const auto& [peer, session] : sessions_) {
+        if (session.active && session.player_id == player) {
+            return transport_.send(peer, Channel::Reliable, message);
+        }
+    }
+    return false;
+}
+
+void Server::broadcast_reliable(std::span<const std::uint8_t> message) {
+    for (const auto& [peer, session] : sessions_) {
+        if (session.active) {
+            transport_.send(peer, Channel::Reliable, message);
         }
     }
 }

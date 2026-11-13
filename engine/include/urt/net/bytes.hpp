@@ -25,9 +25,14 @@ public:
     void u16(std::uint16_t value);
     void u32(std::uint32_t value);
     void f32(float value);
+    void f64(double value);
 
     // One length byte followed by the characters. Longer text is cut to 255.
     void string(std::string_view text);
+
+    // A four-byte length followed by the bytes. For data too long for string().
+    void blob(std::string_view data);
+    void blob(std::span<const std::uint8_t> data);
 
     std::span<const std::uint8_t> bytes() const { return buffer_; }
     std::size_t size() const { return buffer_.size(); }
@@ -49,8 +54,19 @@ public:
     // computed from it.
     float f32();
 
+    // Like f32, for eight bytes.
+    double f64();
+
     // Fails if the text is longer than max_length.
     std::string string(std::size_t max_length);
+
+    // Reads what ByteWriter::blob wrote. Fails if it is longer than max_length
+    // or longer than what is left of the packet; the length is checked before
+    // any memory is reserved.
+    std::string blob(std::size_t max_length);
+
+    // The rest of the packet, without copying. Empty once the reader failed.
+    std::span<const std::uint8_t> rest();
 
     // False once any read failed. Stays false.
     bool ok() const { return ok_; }

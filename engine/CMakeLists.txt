@@ -19,7 +19,10 @@ add_library(urt_engine STATIC
     src/net/protocol.cpp
     src/net/server.cpp
     src/net/transport.cpp
+    src/script/client_script_system.cpp
+    src/script/host.cpp
     src/script/script_system.cpp
+    src/script/value_codec.cpp
     src/script/vm.cpp)
 
 add_library(urt::engine ALIAS urt_engine)

@@ -37,6 +37,13 @@ struct ServerConfig {
     std::uint32_t snapshot_interval = 1; // send a snapshot every N ticks
     double hello_timeout_seconds = 5.0;  // drop connections that never introduce themselves
     std::size_t max_queued_inputs = 8;   // inputs kept per player; more than that and the oldest is dropped
+
+    // Script events a client may send. Each event uses one token; tokens
+    // refill at `event_rate_per_second` up to `event_burst`. Events beyond
+    // that are dropped, and a client that keeps flooding is disconnected.
+    double event_rate_per_second = 30.0;
+    double event_burst = 60.0;
+    std::uint32_t max_dropped_events = 300;
 };
 
 // Something that happened to a player during the current tick.
@@ -47,6 +54,12 @@ struct PlayerEvent {
     NetId id = 0;
     std::string name;
     glm::vec3 position{0.0f}; // where the player appeared, or was last
+};
+
+// A script event a client sent during the current tick.
+struct ReceivedEvent {
+    NetId player = 0;
+    NetEvent event;
 };
 
 struct PlayerInfo {
@@ -84,6 +97,16 @@ public:
     // by tick(); systems that run after the server read it.
     const std::vector<PlayerEvent>& player_events() const { return player_events_; }
 
+    // Script events clients sent during the current tick, in order.
+    const std::vector<ReceivedEvent>& received_events() const { return received_events_; }
+
+    // Sends an already encoded message on the reliable channel. Returns
+    // false if there is no such player.
+    bool send_reliable(NetId player, std::span<const std::uint8_t> message);
+
+    // The same to every player in the game.
+    void broadcast_reliable(std::span<const std::uint8_t> message);
+
     // Creates an entity clients can see, standing still at `transform`.
     NetId spawn(World& world, const Transform& transform);
 
@@ -119,6 +142,8 @@ private:
         std::uint32_t last_received_sequence = 0;
         bool has_received = false;
         std::uint32_t last_input_sequence = 0; // last command simulated; reported in snapshots
+        double event_tokens = 0.0;             // script events this client may still send
+        std::uint32_t dropped_events = 0;
         std::uint64_t connected_tick = 0;
     };
 
@@ -127,6 +152,7 @@ private:
     void handle_hello(World& world, const TickContext& context, PeerId peer, Session& session,
                       std::span<const std::uint8_t> data);
     void handle_input(Session& session, std::span<const std::uint8_t> data);
+    void handle_event(World& world, PeerId peer, Session& session, std::span<const std::uint8_t> data);
     void remove_session(World& world, PeerId peer);
     void reject(PeerId peer, Session& session, RejectReason reason);
     void kick(World& world, PeerId peer, Session& session, std::string_view why);
@@ -138,6 +164,7 @@ private:
     std::unordered_map<PeerId, Session> sessions_;
     std::unordered_map<NetId, Entity> networked_; // every entity with a network id
     std::vector<PlayerEvent> player_events_;
+    std::vector<ReceivedEvent> received_events_;
     std::size_t player_count_ = 0;
     NetId next_net_id_ = 1;
     bool warned_snapshot_overflow_ = false;

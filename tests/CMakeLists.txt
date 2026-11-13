@@ -11,9 +11,16 @@ add_executable(urt_tests
     test_net_movement.cpp
     test_net_protocol.cpp
     test_script.cpp
+    test_script_codec.cpp
+    test_script_net.cpp
     test_time.cpp)
 
 target_link_libraries(urt_tests PRIVATE urt::engine doctest::doctest urt_options)
+
+# test_script_codec.cpp tests a part of the scripting module that has no
+# public header, so it needs the engine's source folder and Luau itself.
+target_include_directories(urt_tests PRIVATE "${CMAKE_SOURCE_DIR}/engine/src")
+target_link_libraries(urt_tests PRIVATE Luau.VM)
 
 add_test(NAME urt_tests COMMAND urt_tests)
 

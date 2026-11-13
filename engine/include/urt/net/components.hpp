@@ -4,6 +4,8 @@
 
 #include "urt/net/protocol.hpp"
 
+#include <glm/vec3.hpp>
+
 
 namespace urt::net {
 
@@ -16,5 +18,11 @@ struct NetworkId {
 
 // Client only: tags the entity this client controls.
 struct LocalPlayer {};
+
+// Client only: a colour a script chose for the entity, used instead of the
+// default when drawing it.
+struct Tint {
+    glm::vec3 color{1.0f};
+};
 
 } // namespace urt::net

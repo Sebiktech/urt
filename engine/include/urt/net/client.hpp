@@ -42,6 +42,21 @@ enum class ClientState {
     Connected,
 };
 
+// Something the server sent for the client's scripts, in arrival order.
+struct ScriptMessage {
+    enum class Kind {
+        ResourceStart, // run `start`
+        ResourceStop,  // stop the resource named `resource`
+        Event,         // deliver `event` to the scripts
+        Reset,         // the connection ended: stop everything
+    };
+
+    Kind kind = Kind::Reset;
+    ServerResourceStart start;
+    std::string resource;
+    NetEvent event;
+};
+
 class Client final : public System {
 public:
     explicit Client(ClientConfig config);
@@ -91,6 +106,13 @@ public:
     // the next; it blends between the two so movement is smooth at any frame
     // rate. Returns false until the first snapshot has arrived.
     bool predicted_pose(float tick_fraction, Pose& out) const;
+
+    // Hands over what the server sent for scripts since the last call. The
+    // client's script system calls this every tick.
+    std::vector<ScriptMessage> take_script_messages();
+
+    // Sends a script event to the server. Returns false when not connected.
+    bool send_event(const NetEvent& event);
 
     // Input commands sent but not yet confirmed by the server.
     std::size_t pending_inputs() const { return pending_.size(); }
@@ -145,6 +167,8 @@ private:
     bool snap_ = false;                // the last correction was too big to hide
     Pose drawn_previous_;              // what was drawn at the previous tick
     Pose drawn_current_;               // what is drawn at this tick
+
+    std::vector<ScriptMessage> script_messages_;
 
     std::vector<Event> events_;
     ServerSnapshot snapshot_;

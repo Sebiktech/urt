@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/vec3.hpp>
@@ -21,7 +22,7 @@
 namespace urt::net {
 
 // Raised whenever a change makes old clients and new servers incompatible.
-inline constexpr std::uint16_t protocol_version = 2;
+inline constexpr std::uint16_t protocol_version = 3;
 
 inline constexpr std::uint16_t default_port = 30777;
 
@@ -29,6 +30,14 @@ inline constexpr std::size_t max_name_length = 32;
 
 // How many input commands fit in one ClientInput packet.
 inline constexpr std::size_t max_inputs_per_packet = 8;
+
+// Limits for scripts and script events travelling over the network.
+inline constexpr std::size_t max_resource_name_length = 64;
+inline constexpr std::size_t max_script_name_length = 200;
+inline constexpr std::size_t max_script_bytes = 1024 * 1024;  // one script file
+inline constexpr std::size_t max_client_scripts = 64;         // per resource
+inline constexpr std::size_t max_event_name_length = 64;
+inline constexpr std::size_t max_event_bytes = 16 * 1024;     // encoded arguments of one event
 
 // Upper limit of entities in one snapshot. At 32 bytes each that is 32 KB.
 inline constexpr std::size_t max_snapshot_entities = 1024;
@@ -43,6 +52,9 @@ enum class MessageType : std::uint8_t {
     ServerReject = 3,
     ClientInput = 4,
     ServerSnapshot = 5,
+    ServerResourceStart = 6,
+    ServerResourceStop = 7,
+    NetEvent = 8,
 };
 
 // The first byte of a packet, or Invalid if the packet is empty or unknown.
@@ -109,6 +121,39 @@ struct ServerSnapshot {
     std::vector<SnapshotEntity> entities;
 };
 
+// One script file of a resource.
+struct ScriptFile {
+    std::string name;   // for error messages, e.g. "welcome/client.lua"
+    std::string source; // Luau source text
+};
+
+// Server -> client, reliable. "Run these scripts as resource X." If the
+// client already runs a resource of that name, it is stopped first; that is
+// how a reload on the server reaches the clients.
+struct ServerResourceStart {
+    std::string resource;
+    std::vector<ScriptFile> scripts;
+};
+
+// Server -> client, reliable. "Stop resource X."
+struct ServerResourceStop {
+    std::string resource;
+};
+
+// Both directions, reliable. An event one script sends to the scripts on the
+// other side. The network layer does not look inside `arguments`; the script
+// layer encodes and decodes them.
+struct NetEvent {
+    std::string name;
+    std::vector<std::uint8_t> arguments;
+};
+
+// Resource names: 1 to 64 of a-z, 0-9, '_' and '-'.
+bool valid_resource_name(std::string_view name);
+
+// Event names: 1 to 64 printable ASCII characters without spaces.
+bool valid_event_name(std::string_view name);
+
 void encode(ByteWriter& out, const ClientHello& message);
 void encode(ByteWriter& out, const ServerWelcome& message);
 void encode(ByteWriter& out, const ServerReject& message);
@@ -121,6 +166,15 @@ bool decode(std::span<const std::uint8_t> packet, ServerWelcome& out);
 bool decode(std::span<const std::uint8_t> packet, ServerReject& out);
 bool decode(std::span<const std::uint8_t> packet, ClientInput& out);
 bool decode(std::span<const std::uint8_t> packet, ServerSnapshot& out);
+
+// These return false for anything over the limits above, so a decoded
+// message is always safe to use.
+void encode(ByteWriter& out, const ServerResourceStart& message);
+void encode(ByteWriter& out, const ServerResourceStop& message);
+void encode(ByteWriter& out, const NetEvent& message);
+bool decode(std::span<const std::uint8_t> packet, ServerResourceStart& out);
+bool decode(std::span<const std::uint8_t> packet, ServerResourceStop& out);
+bool decode(std::span<const std::uint8_t> packet, NetEvent& out);
 
 // True if `a` is newer than `b`. Sequence numbers and ticks are 32-bit and
 // eventually wrap around to zero; comparing the difference keeps working then.

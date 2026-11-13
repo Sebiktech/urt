@@ -1,4 +1,4 @@
-# Sieťový protokol URT (verzia 1)
+# Sieťový protokol URT (verzia 2)
 
 Tento dokument popisuje, čo si klient a server posielajú. Kód je v
 `engine/include/urt/net/` a `engine/src/net/`; pri každej zmene protokolu uprav
@@ -36,10 +36,13 @@ bajt dĺžky a potom znaky.
 | Typ | Správa | Smer | Kanál | Polia |
 |---|---|---|---|---|
 | 1 | `ClientHello` | klient → server | 0 | `u16` verzia, `string` meno (1 až 32 bajtov) |
-| 2 | `ServerWelcome` | server → klient | 0 | `u32` id hráča, `u16` tick rate, `u32` tick servera |
+| 2 | `ServerWelcome` | server → klient | 0 | `u32` id hráča, `u16` tick rate, `u32` tick servera, `f32` rýchlosť chôdze |
 | 3 | `ServerReject` | server → klient | 0 | `u8` dôvod: 1 verzia, 2 plný server, 3 zlé meno |
-| 4 | `ClientInput` | klient → server | 1 | `u32` poradie, `f32` move_x, `f32` move_z, `f32` yaw |
+| 4 | `ClientInput` | klient → server | 1 | `u32` poradie posledného príkazu, `u8` počet (1 až 8), príkazy |
 | 5 | `ServerSnapshot` | server → klient | 1 | `u32` tick, `u32` posledný spracovaný vstup, `u16` počet, entity |
+
+Príkaz v `ClientInput` má 12 bajtov: `f32` move_x, `f32` move_z, `f32` yaw.
+Príkazy idú od najstaršieho po najnovší.
 
 Entita v snapshote má 32 bajtov: `u32` sieťové id, 3× `f32` pozícia, `f32` yaw,
 3× `f32` rýchlosť. Jeden snapshot nesie najviac 1024 entít; ak je ich pri
@@ -61,20 +64,57 @@ do 5 sekúnd nepošle `ClientHello`, server zavrie tiež.
 
 ## Jeden tick servera
 
-1. `net::Server` prečíta pakety, prijme nových hráčov a zo vstupov nastaví
-   rýchlosti.
+1. `net::Server` prečíta pakety, prijme nových hráčov a každému hráčovi vezme
+   z fronty jeden príkaz.
 2. Simulácia (`MovementSystem` a ďalšie systémy) pohne svetom.
 3. `net::ServerSnapshotSystem` pošle každému hráčovi entity z jeho okolia.
 
 Systémy treba do `Application` pridať v tomto poradí.
 
-## Ako server spracuje vstup
+## Vstupy: jeden príkaz na tick
+
+Klient každý tick vytvorí jeden príkaz (smer a natočenie) s ďalším poradovým
+číslom. Paket nesie posledné štyri príkazy, takže stratený paket nič nestratí:
+ďalší jeho príkazy zopakuje. Server podľa poradia zahodí tie, ktoré už má.
+
+Server si príkazy každého hráča ukladá do fronty a **každý tick z nej vezme
+práve jeden**:
 
 - `move_x` a `move_z` oreže na −1 až 1 a vektor skráti na dĺžku najviac 1.
-- Rýchlosť je smer × `walk_speed` (4 m/s). Upravený klient preto nevie
-  chodiť rýchlejšie.
-- Použije len vstup s vyšším poradím, než mal posledný spracovaný.
-- Ak vstupy pol sekundy nechodia, hráč zastane.
+- Rýchlosť je smer × rýchlosť chôdze (4 m/s) a platí jeden tick.
+- Prázdna fronta znamená, že hráč ten tick stojí.
+- Vo fronte je najviac 8 príkazov; pri pretečení sa zahodí najstarší.
+
+Z toho plynú dve veci. Rýchlosť hráča určuje hodinový takt servera, nie počet
+paketov: klient, ktorý posiela príkazy päťkrát rýchlejšie, si len zaplní frontu
+a prebytok sa zahodí. A poloha po príkaze N závisí len od príkazov 1 až N, čo
+je presne to, čo potrebuje predikcia.
+
+Klient preto musí tikať rovnako rýchlo ako server. Tick rate sa dozvie zo
+`ServerWelcome` a prepne sa naň.
+
+## Predikcia vlastnej postavy
+
+Keby klient čakal na server, postava by sa pohla až po ceste paketu tam a
+späť. Namiesto toho:
+
+1. **Predikcia.** Klient príkaz hneď aplikuje na vlastnú postavu rovnakým
+   kódom, aký používa server (`net/movement.hpp`), a zapamätá si ho ako
+   nepotvrdený.
+2. **Potvrdenie.** Snapshot hovorí: „po tvojom príkaze číslo N si bol tu."
+3. **Zmierenie.** Klient zahodí príkazy do N, vezme potvrdenú polohu a
+   nepotvrdené príkazy na ňu aplikuje znova. Ak vyjde to isté, čo predpovedal,
+   nič sa nestane, a to je bežný prípad, lebo obe strany počítajú rovnako.
+4. **Korekcia.** Ak sa výsledok líši (stratený príkaz, zásah skriptu na
+   serveri), rozdiel do 3 m sa nevykreslí naraz, ale rozplynie sa počas
+   niekoľkých tickov. Väčší rozdiel je teleport a ukáže sa okamžite.
+
+Ostatné entity sa nepredpovedajú. Kreslia sa 0,1 s v minulosti a ich poloha sa
+dopočítava medzi dvoma snapshotmi.
+
+Predikcia zatiaľ pokrýva len chôdzu. Všetko, čo neskôr ovplyvní pohyb hráča
+(kolízie, fyzika, vozidlá), musí bežať rovnakým kódom na oboch stranách, inak
+bude server klienta neustále opravovať.
 
 ## Čo server považuje za porušenie protokolu
 
@@ -85,7 +125,7 @@ Spojenie sa zavrie a hráč sa okamžite odstráni zo sveta, keď príde:
 - `ClientInput` pred dokončením handshaku alebo na nesprávnom kanáli.
 
 Poškodený `ClientInput` sa len zahodí, lebo nespoľahlivý paket sa môže
-poškodiť aj bez zlého úmyslu.
+poškodiť aj bez zlého úmyslu. Jeho príkazy zopakuje ďalší paket.
 
 ## Sieťové id
 
@@ -98,9 +138,6 @@ alebo odišla z dosahu. Klient ju zmaže a pri návrate si ju vytvorí znova.
 
 ## Čo zatiaľ chýba
 
-- **Predikcia.** Ostatné entity klient kreslí plynulo (interpolácia medzi
-  snapshotmi, 0,1 s v minulosti), ale vlastná postava reaguje až po ceste na
-  server a späť. Pole „posledný spracovaný vstup" je pripravené pre predikciu.
 - **Delta kompresia.** Posiela sa vždy celý stav okolia, čo je 32 bajtov na
   entitu 30× za sekundu. Pri stovkách entít nablízku to bude priveľa.
 - **Šifrovanie a prihlásenie.** Meno hráča si klient zvolí sám a nič ho

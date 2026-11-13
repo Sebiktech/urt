@@ -119,10 +119,11 @@ TEST_CASE("every message survives encode and decode") {
     }
     SUBCASE("ServerWelcome") {
         ServerWelcome out;
-        REQUIRE(decode(encoded(ServerWelcome{.player_id = 42, .tick_rate = 60, .server_tick = 9000}), out));
+        REQUIRE(decode(encoded(ServerWelcome{.player_id = 42, .tick_rate = 60, .server_tick = 9000, .walk_speed = 5.5f}), out));
         CHECK(out.player_id == 42);
         CHECK(out.tick_rate == 60);
         CHECK(out.server_tick == 9000);
+        CHECK(out.walk_speed == 5.5f);
     }
     SUBCASE("ServerReject") {
         ServerReject out;
@@ -130,12 +131,21 @@ TEST_CASE("every message survives encode and decode") {
         CHECK(out.reason == RejectReason::ServerFull);
     }
     SUBCASE("ClientInput") {
+        ClientInput in;
+        in.sequence = 5;
+        in.count = 3;
+        in.commands[0] = {.move_x = -1.0f, .move_z = 0.25f, .yaw = 3.0f};
+        in.commands[1] = {.move_x = 0.5f, .move_z = 0.0f, .yaw = -1.0f};
+        in.commands[2] = {.move_x = 0.0f, .move_z = 1.0f, .yaw = 0.0f};
         ClientInput out;
-        REQUIRE(decode(encoded(ClientInput{.sequence = 5, .move_x = -1.0f, .move_z = 0.25f, .yaw = 3.0f}), out));
+        REQUIRE(decode(encoded(in), out));
         CHECK(out.sequence == 5);
-        CHECK(out.move_x == -1.0f);
-        CHECK(out.move_z == 0.25f);
-        CHECK(out.yaw == 3.0f);
+        REQUIRE(out.count == 3);
+        CHECK(out.commands[0].move_x == -1.0f);
+        CHECK(out.commands[0].move_z == 0.25f);
+        CHECK(out.commands[0].yaw == 3.0f);
+        CHECK(out.commands[1].move_x == 0.5f);
+        CHECK(out.commands[2].move_z == 1.0f);
     }
     SUBCASE("ServerSnapshot") {
         for (const std::size_t count : {std::size_t{0}, std::size_t{1}, std::size_t{300}}) {
@@ -156,7 +166,7 @@ TEST_CASE("every message survives encode and decode") {
 }
 
 TEST_CASE("decode rejects the wrong type, truncated packets and trailing bytes") {
-    const std::vector<std::uint8_t> input = encoded(ClientInput{.sequence = 1});
+    const std::vector<std::uint8_t> input = encoded(ClientInput{.sequence = 1, .count = 2});
     const std::vector<std::uint8_t> snapshot = encoded(sample_snapshot(3));
 
     ClientInput input_out;
@@ -201,6 +211,38 @@ TEST_CASE("a hello from another protocol version still reports its version") {
     ClientHello out;
     REQUIRE(decode(writer.bytes(), out));
     CHECK(out.version == protocol_version + 1);
+}
+
+TEST_CASE("an input packet must carry between one and eight commands") {
+    ClientInput out;
+    CHECK_FALSE(decode(encoded(ClientInput{.sequence = 1, .count = 0}), out));
+
+    // More than the limit: encode() cuts it down, so build the packet by hand.
+    ByteWriter too_many;
+    too_many.u8(static_cast<std::uint8_t>(MessageType::ClientInput));
+    too_many.u32(100);
+    too_many.u8(9);
+    for (int i = 0; i < 9 * 3; ++i) {
+        too_many.f32(0.0f);
+    }
+    CHECK_FALSE(decode(too_many.bytes(), out));
+
+    // A count that promises more commands than follow.
+    ByteWriter lying;
+    lying.u8(static_cast<std::uint8_t>(MessageType::ClientInput));
+    lying.u32(100);
+    lying.u8(4);
+    lying.f32(0.0f);
+    CHECK_FALSE(decode(lying.bytes(), out));
+
+    // NaN in a command.
+    ClientInput poisoned{.sequence = 1, .count = 1};
+    poisoned.commands[0].move_x = std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(decode(encoded(poisoned), out));
+
+    const ClientInput full{.sequence = 8, .count = 8};
+    CHECK(decode(encoded(full), out));
+    CHECK(out.count == 8);
 }
 
 TEST_CASE("a snapshot cannot claim more entities than it carries") {

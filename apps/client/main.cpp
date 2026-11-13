@@ -65,6 +65,18 @@ bool parse_address(std::string_view text, std::string& host, std::uint16_t& port
     return !host.empty();
 }
 
+// Makes the client tick at the rate the server announced. Movement is counted
+// in ticks on both sides, so different rates would mean different speeds.
+// Returns true if the rate was changed.
+bool adopt_server_tick_rate(urt::Application& app, const urt::net::Client& client) {
+    const double rate = client.server_tick_rate();
+    if (client.state() != urt::net::ClientState::Connected || rate <= 0.0 || rate == app.config().tick_rate) {
+        return false;
+    }
+    app.set_tick_rate(rate);
+    return true;
+}
+
 // Stands in for a human until there is a window and a keyboard: steers the
 // player in a circle and reports once per second.
 class BotSystem final : public urt::System {
@@ -82,6 +94,7 @@ public:
             app_.stop();
             return;
         }
+        adopt_server_tick_rate(app_, client_);
 
         // Walk direction turns slowly, which makes a circle.
         const auto angle = static_cast<float>(context.time * 0.5);
@@ -163,6 +176,10 @@ bool run_windowed(urt::Application& app, urt::net::Client& client, bool validate
             break;
         }
 
+        if (adopt_server_tick_rate(app, client)) {
+            timestep = urt::FixedTimestep(app.config().tick_rate);
+        }
+
         const urt::MoveIntent intent = urt::to_intent(window.poll_keys(), yaw);
         yaw = intent.yaw;
         client.set_input(intent.x, intent.z, intent.yaw);
@@ -171,7 +188,8 @@ bool run_windowed(urt::Application& app, urt::net::Client& client, bool validate
         const urt::Nanoseconds elapsed = now - last;
         last = now;
         app.step(static_cast<std::uint64_t>(timestep.advance(elapsed)));
-        view.update(std::chrono::duration<double>(elapsed).count(), client, app.world());
+        view.update(std::chrono::duration<double>(elapsed).count(), static_cast<float>(timestep.alpha()), client,
+                    app.world());
 
         if (window.screenshot_pressed()) {
             renderer.request_screenshot("urt_screenshot.ppm");

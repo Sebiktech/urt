@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
         client_app.step();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-        view.update(1.0 / tick_rate, client, client_app.world());
+        view.update(1.0 / tick_rate, 1.0f, client, client_app.world());
         ok = check(renderer.draw_frame(view.camera(), view.boxes()), "draw_frame") && ok;
         if (client.player_entity() != entt::null) {
             ++frames_in_world;

@@ -13,6 +13,7 @@
 #include "urt/net/server.hpp"
 #include "urt/net/transport.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -100,6 +101,48 @@ struct Session {
             pump();
         }
         return condition();
+    }
+};
+
+// A hand-driven player: it speaks the protocol directly, so a test can send
+// exactly the packets it wants, including ones a real client never would.
+struct RawPlayer {
+    Transport transport;
+    PeerId server_peer = 0;
+    NetId player_id = 0; // set once the server has welcomed us
+    std::vector<Event> events;
+    ByteWriter writer;
+
+    explicit RawPlayer(std::uint16_t port) { server_peer = transport.connect("127.0.0.1", port); }
+
+    void poll() {
+        events.clear();
+        transport.poll(events);
+        for (const Event& event : events) {
+            if (event.type == Event::Type::Connected) {
+                writer.clear();
+                encode(writer, ClientHello{.version = protocol_version, .name = "Raw"});
+                transport.send(server_peer, Channel::Reliable, writer.bytes());
+            } else if (event.type == Event::Type::Received) {
+                ServerWelcome welcome;
+                if (decode(event.data, welcome)) {
+                    player_id = welcome.player_id;
+                }
+            }
+        }
+        transport.flush();
+    }
+
+    // Sends one packet whose commands all walk in +x and end at `newest_sequence`.
+    void send_walk(std::uint32_t newest_sequence, std::uint8_t count) {
+        ClientInput packet{.sequence = newest_sequence, .count = count};
+        for (std::uint8_t i = 0; i < count; ++i) {
+            packet.commands[i].move_x = 1.0f;
+        }
+        writer.clear();
+        encode(writer, packet);
+        transport.send(server_peer, Channel::Unreliable, writer.bytes());
+        transport.flush();
     }
 };
 
@@ -310,7 +353,7 @@ TEST_CASE("the server drops misbehaving connections and keeps serving the rest")
         CHECK(run_raw([&](RawPeer& raw) { raw.transport.send(raw.server_peer, Channel::Reliable, garbage); }));
     }
     SUBCASE("input before the handshake") {
-        encode(writer, ClientInput{.sequence = 1, .move_x = 1.0f});
+        encode(writer, ClientInput{.sequence = 1, .count = 1});
         CHECK(run_raw([&](RawPeer& raw) {
             raw.transport.send(raw.server_peer, Channel::Unreliable, writer.bytes());
         }));
@@ -349,9 +392,7 @@ TEST_CASE("the server drops misbehaving connections and keeps serving the rest")
 
 TEST_CASE("a player whose inputs stop arriving stops moving") {
     QuietLog quiet;
-    ServerConfig config;
-    config.input_timeout_seconds = 0.2; // 10 ticks
-    TestServer server(config);
+    TestServer server;
     TestClient anna(server, "Anna");
     Session session{server, {&anna}};
     REQUIRE(session.pump_until([&] { return connected(anna); }));
@@ -362,11 +403,173 @@ TEST_CASE("a player whose inputs stop arriving stops moving") {
     auto& registry = server.app.world().registry;
     CHECK(registry.get<Velocity>(on_server).linear.z == doctest::Approx(4.0f));
 
-    // The client freezes: only the server keeps ticking.
+    // The client freezes: only the server keeps ticking. It uses up the few
+    // commands it still has and then holds the player still.
     for (int i = 0; i < 20; ++i) {
         server.app.step();
     }
     CHECK(registry.get<Velocity>(on_server).linear.z == 0.0f);
+}
+
+TEST_CASE("prediction moves the player at once and matches the server exactly") {
+    QuietLog quiet;
+    TestServer server;
+    TestClient anna(server, "Anna");
+    Session session{server, {&anna}};
+    REQUIRE(session.pump_until([&] { return connected(anna); }));
+    session.pump(5);
+
+    const Entity on_server = server.server.player_entity(anna.client.player_id());
+    auto& server_registry = server.app.world().registry;
+    const Transform& truth = server_registry.get<Transform>(on_server);
+    const Transform& confirmed = anna.app.world().registry.get<Transform>(anna.client.player_entity());
+
+    Pose predicted;
+    REQUIRE(anna.client.predicted_pose(1.0f, predicted));
+    const float start_x = predicted.position.x;
+    CHECK(start_x == truth.position.x);
+
+    anna.client.set_input(1.0f, 0.0f, 0.5f);
+
+    // The very first tick already moves the predicted player by one step
+    // (4 m/s * 0.02 s), before the server has even received the command.
+    anna.app.step();
+    REQUIRE(anna.client.predicted_pose(1.0f, predicted));
+    CHECK(predicted.position.x - start_x == doctest::Approx(0.08f));
+    CHECK(predicted.yaw == doctest::Approx(0.5f));
+    CHECK(confirmed.position.x == start_x); // the server has confirmed nothing yet
+    server.app.step();
+
+    // While walking, every tick moves the drawn player by exactly one step.
+    // Any disagreement with the server would show up here as an uneven step.
+    float previous_x = predicted.position.x;
+    for (int i = 0; i < 60; ++i) {
+        session.pump();
+        REQUIRE(anna.client.predicted_pose(1.0f, predicted));
+        CHECK(predicted.position.x - previous_x == doctest::Approx(0.08f).epsilon(0.001));
+        previous_x = predicted.position.x;
+        // Prediction is ahead of what the server has confirmed, by the
+        // commands still on their way.
+        CHECK(predicted.position.x >= confirmed.position.x);
+        CHECK(anna.client.pending_inputs() <= 6);
+    }
+
+    // Halfway between two ticks the drawn pose is halfway between them.
+    Pose half;
+    REQUIRE(anna.client.predicted_pose(0.5f, half));
+    CHECK(half.position.x == doctest::Approx(predicted.position.x - 0.04f));
+
+    // Stop and let the last commands arrive: prediction and server agree to
+    // the last bit, because both did the same arithmetic.
+    anna.client.set_input(0.0f, 0.0f, 0.5f);
+    session.pump(20);
+    REQUIRE(anna.client.predicted_pose(1.0f, predicted));
+    CHECK(predicted.position.x == truth.position.x);
+    CHECK(predicted.position.z == truth.position.z);
+    CHECK(confirmed.position.x == truth.position.x);
+    CHECK(truth.position.x - start_x == doctest::Approx(61 * 0.08f).epsilon(0.001));
+}
+
+TEST_CASE("sending inputs faster than the server ticks does not make a player faster") {
+    QuietLog quiet;
+    TestServer server;
+    Session session{server, {}};
+    RawPlayer cheat(server.server.port());
+    REQUIRE(session.pump_until([&] {
+        cheat.poll();
+        return cheat.player_id != 0;
+    }));
+
+    const Entity on_server = server.server.player_entity(cheat.player_id);
+    REQUIRE(exists(on_server));
+    const Transform& truth = server.app.world().registry.get<Transform>(on_server);
+    const float start_x = truth.position.x;
+
+    // Five new commands every tick: five times the honest rate.
+    std::uint32_t sequence = 0;
+    constexpr int ticks = 100;
+    for (int i = 0; i < ticks; ++i) {
+        sequence += 5;
+        cheat.send_walk(sequence, 5);
+        cheat.poll();
+        session.pump();
+    }
+
+    // One command is simulated per tick, so the distance is at most what an
+    // honest player covers: 100 ticks * 0.08 m.
+    const float moved = truth.position.x - start_x;
+    CHECK(moved > ticks * 0.08f * 0.9f);
+    CHECK(moved <= ticks * 0.08f + 1e-3f);
+    CHECK(server.server.player_count() == 1);
+}
+
+TEST_CASE("commands from lost packets are recovered from the next packet") {
+    QuietLog quiet;
+    TestServer server;
+    Session session{server, {}};
+    RawPlayer player(server.server.port());
+    REQUIRE(session.pump_until([&] {
+        player.poll();
+        return player.player_id != 0;
+    }));
+    const Transform& truth =
+        server.app.world().registry.get<Transform>(server.server.player_entity(player.player_id));
+    const float start_x = truth.position.x;
+
+    // Command 1 arrives. The packets for commands 2 and 3 are "lost" (never
+    // sent). The packet for command 4 repeats 1 to 4.
+    player.send_walk(1, 1);
+    session.pump(3);
+    player.send_walk(4, 4);
+    session.pump(10);
+    CHECK(truth.position.x - start_x == doctest::Approx(4 * 0.08f).epsilon(0.001));
+
+    // The same packet again (a duplicate on the network) changes nothing,
+    // and neither does an old one arriving late.
+    player.send_walk(4, 4);
+    player.send_walk(2, 2);
+    session.pump(10);
+    CHECK(truth.position.x - start_x == doctest::Approx(4 * 0.08f).epsilon(0.001));
+}
+
+TEST_CASE("server corrections are hidden when small and shown at once when large") {
+    QuietLog quiet;
+    TestServer server;
+    TestClient anna(server, "Anna");
+    Session session{server, {&anna}};
+    REQUIRE(session.pump_until([&] { return connected(anna); }));
+    session.pump(5);
+
+    Transform& truth = server.app.world().registry.get<Transform>(server.server.player_entity(anna.client.player_id()));
+    Pose drawn;
+    REQUIRE(anna.client.predicted_pose(1.0f, drawn));
+
+    SUBCASE("a nudge of one metre fades in") {
+        truth.position.x += 1.0f; // as a script or a collision would
+        float previous_x = drawn.position.x;
+        float largest_step = 0.0f;
+        for (int i = 0; i < 120; ++i) {
+            session.pump();
+            REQUIRE(anna.client.predicted_pose(1.0f, drawn));
+            largest_step = std::max(largest_step, std::abs(drawn.position.x - previous_x));
+            previous_x = drawn.position.x;
+        }
+        CHECK(largest_step < 0.2f);                  // never a visible jump...
+        CHECK(drawn.position.x == truth.position.x); // ...yet it ends up exactly right
+    }
+
+    SUBCASE("a teleport is shown immediately") {
+        truth.position.x += 1000.0f;
+        const float before = drawn.position.x;
+        REQUIRE(session.pump_until([&] {
+            anna.client.predicted_pose(1.0f, drawn);
+            return drawn.position.x != before;
+        }));
+        CHECK(drawn.position.x == truth.position.x); // one step, no gliding
+        Pose between;
+        REQUIRE(anna.client.predicted_pose(0.5f, between));
+        CHECK(between.position.x == truth.position.x); // not blended across the jump either
+    }
 }
 
 TEST_CASE("Transport refuses an empty host name and a port that is taken") {

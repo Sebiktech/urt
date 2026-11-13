@@ -59,6 +59,19 @@ TEST_CASE("Application runs systems in order with a correct tick context") {
     CHECK(first.last_time == doctest::Approx(0.04));
 }
 
+TEST_CASE("Application::set_tick_rate changes the length of the following ticks") {
+    urt::Application app(quiet_config()); // 50 ticks/s
+    std::vector<int> order;
+    auto& recorder = app.add_system<RecordingSystem>(order, 1);
+
+    app.step();
+    CHECK(recorder.last_dt == doctest::Approx(0.02));
+    app.set_tick_rate(100.0);
+    app.step();
+    CHECK(recorder.last_dt == doctest::Approx(0.01));
+    CHECK(app.config().tick_rate == 100.0);
+}
+
 TEST_CASE("MovementSystem integrates velocity over ticks") {
     urt::Application app(quiet_config());
     app.add_system<urt::MovementSystem>();

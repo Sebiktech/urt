@@ -2,15 +2,17 @@
 
 #include "urt/render/shapes.hpp"
 
-void WorldView::update(double frame_seconds, const urt::net::Client& client, urt::World& world) {
+void WorldView::update(double frame_seconds, float tick_fraction, const urt::net::Client& client,
+                       urt::World& world) {
     playback_.advance(frame_seconds);
     if (client.snapshots_received() != seen_snapshots_) {
         seen_snapshots_ = client.snapshots_received();
         playback_.observe(client.latest_server_time());
     }
 
-    // Each entity is drawn where it was at the playback time, not where the
-    // newest snapshot put it. That is what makes movement smooth.
+    // Other entities are drawn where they were at the playback time, a moment
+    // in the past, blended between two snapshots. Our own player is drawn
+    // where prediction says it is right now, so it reacts at once.
     boxes_.clear();
     const urt::Entity me = client.player_entity();
     for (auto [entity, history] : world.registry.view<const urt::net::PoseHistory>().each()) {
@@ -19,6 +21,9 @@ void WorldView::update(double frame_seconds, const urt::net::Client& client, urt
             continue;
         }
         const bool is_me = entity == me;
+        if (is_me) {
+            client.predicted_pose(tick_fraction, pose); // keeps the history pose if not ready
+        }
         urt::render::add_character(boxes_, pose.position, pose.yaw,
                                    is_me ? urt::render::local_player_color : urt::render::other_entity_color);
         if (is_me) {

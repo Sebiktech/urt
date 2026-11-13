@@ -21,7 +21,9 @@ public:
     explicit WorldView(double interpolation_delay = 0.1) : playback_(interpolation_delay) {}
 
     // Call once per frame, after the client's ticks for that frame have run.
-    void update(double frame_seconds, const urt::net::Client& client, urt::World& world);
+    // tick_fraction (0..1) is how far this frame is between the last tick and
+    // the next one.
+    void update(double frame_seconds, float tick_fraction, const urt::net::Client& client, urt::World& world);
 
     std::span<const urt::render::Box> boxes() const { return boxes_; }
     const urt::render::Camera& camera() const { return camera_; }

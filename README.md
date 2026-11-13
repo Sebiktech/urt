@@ -3,7 +3,7 @@
 Vlastný engine, hra a editor pre roleplay servery. Server je autorita, herná
 logika beží v Lua resources a editor je klient v inom režime.
 
-Stav: **krok 1 (jadro) je hotový, z kroku 2 funguje sieťová kostra.** Hráči sa
+Stav: **kroky 1 (jadro) a 2 (sieť) sú hotové.** Hráči sa
 pripoja, chodia a vidia sa navzájom v okne kreslenom cez Vulkan, zatiaľ ako
 farebné kvádre. Lua ešte nie je.
 
@@ -15,7 +15,7 @@ farebné kvádre. Lua ešte nie je.
 | `engine/include/urt/core/` | logovanie, čas a pevný tick, platformová vrstva, job systém, argumenty |
 | `engine/include/urt/ecs/` | svet (EnTT), komponenty, rozhranie systému, `MovementSystem` |
 | `engine/include/urt/app/` | `Application`: hlavná slučka nad svetom a systémami |
-| `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management, interpolácia |
+| `engine/include/urt/net/` | transport (ENet), protokol, server, klient, interest management, interpolácia, predikcia |
 | `docs/network.md` | popis sieťového protokolu |
 | `apps/server/` | `urt_server`, dedikovaný headless server |
 | `render/` | knižnica `urt_render`: Vulkan renderer, linkuje ju len klient |
@@ -54,9 +54,10 @@ Klient otvorí okno: ty si oranžový kváder, ostatní hráči a NPC modré, bi
 kocka ukazuje, kam sa kto pozerá. Chodíš klávesmi WASD alebo šípkami, F12 uloží
 snímku do `urt_screenshot.ppm`, Esc okno zavrie.
 
-Ostatné entity sa hýbu plynulo, lebo klient ich kreslí 0,1 s v minulosti a
-polohu dopočítava medzi dvoma snapshotmi. Vlastná postava reaguje s rovnakým
-oneskorením plus cestou po sieti; to odstráni až predikcia.
+Vlastná postava reaguje okamžite: klient jej pohyb predpovedá a server ho len
+potvrdzuje. Ostatné entity sa hýbu plynulo, lebo ich klient kreslí 0,1 s
+v minulosti a polohu dopočítava medzi dvoma snapshotmi. Ako to funguje, je
+v `docs/network.md`.
 
 S prepínačom `--headless` klient okno neotvorí, chodí sám v kruhu a raz za
 sekundu vypíše, čo vidí. `--validate` zapne kontrolu volaní Vulkanu (v debug
@@ -107,10 +108,8 @@ Systémy bežia v poradí, v akom boli pridané. Na cyklus cez veľa entít pou�
 ## Plán
 
 1. ~~Jadro: CMake, platforma, job systém, ECS, logovanie, headless build~~
-2. Sieťová kostra
-   - ~~transport, protokol, pripojenie, replikácia entít, interest management~~
-   - ~~okno, ovládanie z klávesnice, interpolácia entít~~
-   - predikcia vlastnej postavy na klientovi
+2. ~~Sieť: transport, protokol, replikácia entít, interest management, okno,
+   interpolácia, predikcia vlastnej postavy~~
 3. Lua resources: manifest, client/server/shared skripty, eventy a RPC, hot reload
 4. Renderer: ~~základ vo Vulkane (swapchain, depth, pipeline)~~, glTF, PBR, tiene, animácie
 5. Fyzika: Jolt, character controller, prvé vozidlo

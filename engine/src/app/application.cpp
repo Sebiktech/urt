@@ -70,7 +70,16 @@ int Application::run() {
         return !stop_requested_.load() && !platform::shutdown_requested();
     };
 
+    double current_rate = config_.tick_rate;
+
     while (keep_running()) {
+        if (config_.tick_rate != current_rate) {
+            // set_tick_rate() was called: start over with the new tick length.
+            current_rate = config_.tick_rate;
+            timestep = FixedTimestep(current_rate);
+            log::info("app", "{} now runs at {} ticks/s", config_.name, current_rate);
+        }
+
         const Clock::time_point now = Clock::now();
         const int due = timestep.advance(now - last);
         last = now;

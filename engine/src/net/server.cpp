@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 
 namespace urt::net {
 namespace {
@@ -44,6 +43,8 @@ glm::vec3 spawn_point(NetId id) {
 Server::Server(ServerConfig config)
     : config_(config), grid_(std::max(config.interest_radius / 3.0f, 1.0f)) {
     config_.snapshot_interval = std::max<std::uint32_t>(config_.snapshot_interval, 1);
+    config_.max_queued_inputs = std::max<std::size_t>(config_.max_queued_inputs, 1);
+    config_.walk_speed = std::max(config_.walk_speed, 0.0f);
 }
 
 bool Server::start() {
@@ -107,7 +108,7 @@ void Server::tick(World& world, const TickContext& context) {
         }
     }
 
-    apply_inputs(world, context);
+    consume_inputs(world);
 }
 
 void Server::handle_packet(World& world, const TickContext& context, PeerId peer, Session& session,
@@ -127,7 +128,7 @@ void Server::handle_packet(World& world, const TickContext& context, PeerId peer
             kick(world, peer, session, "unexpected input");
             return;
         }
-        handle_input(world, context, session, data);
+        handle_input(session, data);
         return;
     case MessageType::ServerWelcome:
     case MessageType::ServerReject:
@@ -164,7 +165,6 @@ void Server::handle_hello(World& world, const TickContext& context, PeerId peer,
     const NetId id = make_networked(world, entity);
     registry.emplace<Transform>(entity, Transform{.position = spawn_point(id)});
     registry.emplace<Velocity>(entity);
-    registry.emplace<PlayerInput>(entity, PlayerInput{.received_tick = context.tick});
 
     session.active = true;
     session.entity = entity;
@@ -175,51 +175,67 @@ void Server::handle_hello(World& world, const TickContext& context, PeerId peer,
     writer_.clear();
     encode(writer_, ServerWelcome{.player_id = id,
                                   .tick_rate = tick_rate_of(context),
-                                  .server_tick = static_cast<std::uint32_t>(context.tick)});
+                                  .server_tick = static_cast<std::uint32_t>(context.tick),
+                                  .walk_speed = config_.walk_speed});
     transport_.send(peer, Channel::Reliable, writer_.bytes());
 
     log::info("net", "'{}' joined as player {} ({} online)", session.name, id, player_count_);
 }
 
-void Server::handle_input(World& world, const TickContext& context, Session& session,
-                          std::span<const std::uint8_t> data) {
+void Server::handle_input(Session& session, std::span<const std::uint8_t> data) {
     ClientInput input;
     if (!decode(data, input)) {
         // Unreliable packets are never resent, so a damaged one is simply
-        // skipped. The next input replaces it a tick later.
+        // skipped. The next packet repeats its commands.
         return;
     }
-    if (session.has_input && !sequence_newer(input.sequence, session.last_input_sequence)) {
-        return; // older than what we already have
-    }
-    session.has_input = true;
-    session.last_input_sequence = input.sequence;
 
-    // The decoder guarantees finite numbers; the ranges are enforced here.
-    // The client only states a direction. Speed is decided by the server, so
-    // a modified client cannot move faster than anyone else.
-    glm::vec2 move{std::clamp(input.move_x, -1.0f, 1.0f), std::clamp(input.move_z, -1.0f, 1.0f)};
-    const float length = std::sqrt(move.x * move.x + move.y * move.y);
-    if (length > 1.0f) {
-        move /= length;
-    }
+    // The packet holds `count` commands ending at `sequence`. Most of them
+    // were already delivered by earlier packets; only take the new ones.
+    for (std::size_t i = 0; i < input.count; ++i) {
+        const std::uint32_t sequence = input.sequence - static_cast<std::uint32_t>(input.count - 1 - i);
+        if (session.has_received && !sequence_newer(sequence, session.last_received_sequence)) {
+            continue;
+        }
+        session.has_received = true;
+        session.last_received_sequence = sequence;
 
-    PlayerInput& stored = world.registry.get<PlayerInput>(session.entity);
-    stored.move = move;
-    stored.yaw = std::remainder(input.yaw, 2.0f * std::numbers::pi_v<float>);
-    stored.received_tick = context.tick;
+        const InputCommand& raw = input.commands[i];
+        session.queue.push_back(QueuedInput{sequence, sanitize_move(raw.move_x, raw.move_z, raw.yaw)});
+
+        // A client that sends commands faster than the server ticks (a
+        // speed hack, or a clock running fast) only fills its queue: the
+        // overflow is thrown away, never simulated.
+        if (session.queue.size() > config_.max_queued_inputs) {
+            session.queue.pop_front();
+        }
+    }
 }
 
-void Server::apply_inputs(World& world, const TickContext& context) {
-    auto view = world.registry.view<const PlayerInput, Velocity, Transform>();
-    for (auto [entity, input, velocity, transform] : view.each()) {
-        const double age = static_cast<double>(context.tick - input.received_tick) * context.dt;
-        // No fresh input (lag, or the client froze): stand still rather than
-        // keep walking in the last direction forever.
-        const glm::vec2 move = age > config_.input_timeout_seconds ? glm::vec2{0.0f} : input.move;
+// Exactly one command per player per tick. This is what ties a player's
+// speed to the server's clock no matter how many commands the client sends,
+// and what lets the client predict the result: the position after command N
+// depends only on the commands up to N.
+void Server::consume_inputs(World& world) {
+    auto& registry = world.registry;
+    for (auto& [peer, session] : sessions_) {
+        if (!session.active) {
+            continue;
+        }
+        Velocity& velocity = registry.get<Velocity>(session.entity);
+        if (session.queue.empty()) {
+            // Nothing arrived in time (lag, or the client stopped): stand
+            // still. Guessing would make the server disagree with the
+            // client's own prediction.
+            velocity.linear = glm::vec3{0.0f};
+            continue;
+        }
+        const QueuedInput input = session.queue.front();
+        session.queue.pop_front();
 
-        velocity.linear = {move.x * config_.walk_speed, 0.0f, move.y * config_.walk_speed};
-        transform.yaw = input.yaw;
+        velocity.linear = move_velocity(input.command, config_.walk_speed);
+        registry.get<Transform>(session.entity).yaw = input.command.yaw;
+        session.last_input_sequence = input.sequence;
     }
 }
 

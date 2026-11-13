@@ -4,7 +4,7 @@
 //
 // Each tick has two network phases with the simulation in between:
 //
-//   Server::tick            read packets, accept players, turn inputs into velocities
+//   Server::tick            read packets, accept players, take one input per player
 //   MovementSystem, ...     simulate
 //   ServerSnapshotSystem    send every client the entities near its player
 //
@@ -13,11 +13,13 @@
 #include "urt/ecs/system.hpp"
 #include "urt/ecs/world.hpp"
 #include "urt/net/interest_grid.hpp"
+#include "urt/net/movement.hpp"
 #include "urt/net/protocol.hpp"
 #include "urt/net/transport.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,7 +35,7 @@ struct ServerConfig {
     float interest_radius = 150.0f;      // metres; clients see entities this close
     std::uint32_t snapshot_interval = 1; // send a snapshot every N ticks
     double hello_timeout_seconds = 5.0;  // drop connections that never introduce themselves
-    double input_timeout_seconds = 0.5;  // stop a player whose inputs stopped arriving
+    std::size_t max_queued_inputs = 8;   // inputs kept per player; more than that and the oldest is dropped
 };
 
 class Server final : public System {
@@ -65,14 +67,22 @@ public:
     void send_snapshots(World& world, const TickContext& context);
 
 private:
+    struct QueuedInput {
+        std::uint32_t sequence = 0;
+        MoveCommand command;
+    };
+
     struct Session {
         bool active = false; // handshake completed
         bool kicked = false; // disconnect requested, ignore whatever still arrives
         Entity entity = entt::null;
         NetId player_id = 0;
         std::string name;
-        std::uint32_t last_input_sequence = 0;
-        bool has_input = false;
+        // Commands that arrived but have not been simulated yet, oldest first.
+        std::deque<QueuedInput> queue;
+        std::uint32_t last_received_sequence = 0;
+        bool has_received = false;
+        std::uint32_t last_input_sequence = 0; // last command simulated; reported in snapshots
         std::uint64_t connected_tick = 0;
     };
 
@@ -80,13 +90,12 @@ private:
                        Channel channel, std::span<const std::uint8_t> data);
     void handle_hello(World& world, const TickContext& context, PeerId peer, Session& session,
                       std::span<const std::uint8_t> data);
-    void handle_input(World& world, const TickContext& context, Session& session,
-                      std::span<const std::uint8_t> data);
+    void handle_input(Session& session, std::span<const std::uint8_t> data);
     void remove_session(World& world, PeerId peer);
     void reject(PeerId peer, Session& session, RejectReason reason);
     void kick(World& world, PeerId peer, Session& session, std::string_view why);
     void despawn(World& world, Session& session);
-    void apply_inputs(World& world, const TickContext& context);
+    void consume_inputs(World& world);
 
     ServerConfig config_;
     Transport transport_;

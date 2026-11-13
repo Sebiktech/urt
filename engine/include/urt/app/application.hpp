@@ -43,6 +43,10 @@ public:
     // Number of ticks simulated so far.
     std::uint64_t tick() const { return tick_; }
 
+    // Changes how many ticks run per second, from the next tick on. A client
+    // uses it to tick at the rate its server announced.
+    void set_tick_rate(double ticks_per_second) { config_.tick_rate = ticks_per_second; }
+
     // Adds a system. Systems run every tick in the order they were added.
     template <class T, class... Args>
     T& add_system(Args&&... args) {

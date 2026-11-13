@@ -9,6 +9,9 @@ namespace {
 // Bytes one SnapshotEntity takes on the wire: id + position + yaw + velocity.
 constexpr std::size_t snapshot_entity_size = 4 + 12 + 4 + 12;
 
+// Bytes one InputCommand takes: move_x + move_z + yaw.
+constexpr std::size_t input_command_size = 4 + 4 + 4;
+
 void write_type(ByteWriter& out, MessageType type) { out.u8(static_cast<std::uint8_t>(type)); }
 
 // Reads the type byte and checks that it is the expected message.
@@ -80,6 +83,7 @@ void encode(ByteWriter& out, const ServerWelcome& message) {
     out.u32(message.player_id);
     out.u16(message.tick_rate);
     out.u32(message.server_tick);
+    out.f32(message.walk_speed);
 }
 
 bool decode(std::span<const std::uint8_t> packet, ServerWelcome& out) {
@@ -91,7 +95,8 @@ bool decode(std::span<const std::uint8_t> packet, ServerWelcome& out) {
     message.player_id = reader.u32();
     message.tick_rate = reader.u16();
     message.server_tick = reader.u32();
-    if (!reader.finished() || message.player_id == 0 || message.tick_rate == 0) {
+    message.walk_speed = reader.f32();
+    if (!reader.finished() || message.player_id == 0 || message.tick_rate == 0 || message.walk_speed < 0.0f) {
         return false;
     }
     out = message;
@@ -118,10 +123,14 @@ bool decode(std::span<const std::uint8_t> packet, ServerReject& out) {
 
 void encode(ByteWriter& out, const ClientInput& message) {
     write_type(out, MessageType::ClientInput);
+    const std::size_t count = std::min<std::size_t>(message.count, max_inputs_per_packet);
     out.u32(message.sequence);
-    out.f32(message.move_x);
-    out.f32(message.move_z);
-    out.f32(message.yaw);
+    out.u8(static_cast<std::uint8_t>(count));
+    for (std::size_t i = 0; i < count; ++i) {
+        out.f32(message.commands[i].move_x);
+        out.f32(message.commands[i].move_z);
+        out.f32(message.commands[i].yaw);
+    }
 }
 
 bool decode(std::span<const std::uint8_t> packet, ClientInput& out) {
@@ -131,9 +140,16 @@ bool decode(std::span<const std::uint8_t> packet, ClientInput& out) {
     }
     ClientInput message;
     message.sequence = reader.u32();
-    message.move_x = reader.f32();
-    message.move_z = reader.f32();
-    message.yaw = reader.f32();
+    message.count = reader.u8();
+    if (!reader.ok() || message.count == 0 || message.count > max_inputs_per_packet ||
+        reader.remaining() != message.count * input_command_size) {
+        return false;
+    }
+    for (std::size_t i = 0; i < message.count; ++i) {
+        message.commands[i].move_x = reader.f32();
+        message.commands[i].move_z = reader.f32();
+        message.commands[i].yaw = reader.f32();
+    }
     if (!reader.finished()) {
         return false;
     }

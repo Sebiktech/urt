@@ -8,6 +8,7 @@ add_executable(urt_tests
     test_net_grid.cpp
     test_net_integration.cpp
     test_net_interpolation.cpp
+    test_net_movement.cpp
     test_net_protocol.cpp
     test_time.cpp)
 

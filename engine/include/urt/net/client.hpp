@@ -4,16 +4,22 @@
 //
 // Each tick the client reads what the server sent, mirrors the newest
 // snapshot into the local world, and sends the player's current input.
-// The client never moves entities by itself: every position comes from the
-// server. (Prediction and interpolation will soften that later.)
+//
+// Other entities only ever move as the server says. The client's own player
+// is predicted: its input is applied locally at once, so walking feels
+// immediate, and every snapshot is used to check that prediction (see
+// predicted_pose and docs/network.md).
 
 #include "urt/ecs/system.hpp"
 #include "urt/ecs/world.hpp"
+#include "urt/net/interpolation.hpp"
+#include "urt/net/movement.hpp"
 #include "urt/net/protocol.hpp"
 #include "urt/net/transport.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <span>
 #include <string>
@@ -78,6 +84,20 @@ public:
     // move_x and move_z are a world-space direction, each in -1..1.
     void set_input(float move_x, float move_z, float yaw);
 
+    // Where to draw our own player. Unlike the Transform, which holds the
+    // last position the server confirmed, this already includes the inputs
+    // the server has not answered yet.
+    // tick_fraction (0..1) is how far the frame is between the last tick and
+    // the next; it blends between the two so movement is smooth at any frame
+    // rate. Returns false until the first snapshot has arrived.
+    bool predicted_pose(float tick_fraction, Pose& out) const;
+
+    // Input commands sent but not yet confirmed by the server.
+    std::size_t pending_inputs() const { return pending_.size(); }
+
+    // Length of one simulation tick as the server announced it, in seconds.
+    float tick_seconds() const { return tick_seconds_; }
+
     std::string_view name() const override { return "net-client"; }
     void tick(World& world, const TickContext& context) override;
 
@@ -87,8 +107,15 @@ private:
         std::uint32_t seen_tick = 0; // server tick of the last snapshot containing it
     };
 
+    struct PendingInput {
+        std::uint32_t sequence = 0;
+        MoveCommand command;
+    };
+
     void handle_packet(World& world, Channel channel, std::span<const std::uint8_t> data);
     void apply_snapshot(World& world, const ServerSnapshot& snapshot);
+    void reconcile(const SnapshotEntity& confirmed, std::uint32_t confirmed_sequence);
+    void send_input();
     void clear_world(World& world);
 
     ClientConfig config_;
@@ -106,7 +133,18 @@ private:
     std::uint64_t snapshots_received_ = 0;
     std::unordered_map<NetId, Replicated> entities_;
 
-    ClientInput input_;
+    // Prediction of our own player.
+    InputCommand wanted_;              // what set_input() last asked for
+    std::uint32_t sequence_ = 0;       // sequence number of the newest command
+    std::deque<PendingInput> pending_; // sent, not yet confirmed; oldest first
+    float walk_speed_ = 0.0f;
+    float tick_seconds_ = 0.0f;
+    bool has_prediction_ = false;
+    Pose predicted_;                   // confirmed position plus all pending commands
+    glm::vec3 correction_{0.0f};       // drawn offset that hides small corrections, fading out
+    bool snap_ = false;                // the last correction was too big to hide
+    Pose drawn_previous_;              // what was drawn at the previous tick
+    Pose drawn_current_;               // what is drawn at this tick
 
     std::vector<Event> events_;
     ServerSnapshot snapshot_;

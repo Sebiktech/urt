@@ -84,9 +84,10 @@ int run_server(const urt::Args& args) {
         return 2;
     }
 
-    const std::optional<double> tick_rate = args.number("tick-rate", 30.0);
-    if (!tick_rate || *tick_rate < 1.0 || *tick_rate > 1000.0) {
-        urt::log::error("server", "--tick-rate needs a number between 1 and 1000");
+    // A whole number: clients are told the rate and must tick at exactly the
+    // same one for their movement prediction to match.
+    double tick_rate = 0;
+    if (!read_count(args, "tick-rate", 30, 1, 1000, tick_rate)) {
         return 2;
     }
 
@@ -106,7 +107,7 @@ int run_server(const urt::Args& args) {
     urt::AppConfig config;
     config.name = "urt_server";
     config.role = urt::Role::Server;
-    config.tick_rate = *tick_rate;
+    config.tick_rate = tick_rate;
     config.max_ticks = static_cast<std::uint64_t>(max_ticks);
     config.worker_threads = static_cast<unsigned>(threads);
 

@@ -8,6 +8,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace urt {
 
@@ -156,7 +157,9 @@ void JobSystem::parallel_for(std::size_t count, std::size_t chunk_size, const Ra
 
             std::lock_guard lock(state->mutex);
             if (error && !state->helper_error) {
-                state->helper_error = error;
+                // Moved, not copied: from here on only the caller's thread
+                // touches the exception.
+                state->helper_error = std::move(error);
             }
             --state->helpers_running;
             state->done_cv.notify_all();
@@ -181,7 +184,7 @@ void JobSystem::parallel_for(std::size_t count, std::size_t chunk_size, const Ra
         std::unique_lock lock(state->mutex);
         state->closed = true;
         state->done_cv.wait(lock, [&] { return state->helpers_running == 0; });
-        helper_error = state->helper_error;
+        helper_error = std::exchange(state->helper_error, nullptr);
     }
 
     // `body` is no longer used by anyone, so it is safe to leave this scope.
